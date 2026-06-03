@@ -1,28 +1,40 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import secrets
+import shlex
 import string
-from pathlib import Path
 
-
-ENV_KEYS = {
-    "username": "ADMIN_USERNAME",
-    "password": "ADMIN_PASSWORD",
-    "secret-key": "SECRET_KEY",
-    "upload-token": "UPLOAD_TOKEN",
-    "base-url": "APP_BASE_URL",
-    "data-dir": "DATA_DIR",
-}
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8725
+ENV_HELP = """Environment variables:
+  ADMIN_USERNAME              Admin login username (default: admin)
+  ADMIN_PASSWORD              Admin login password (default: password)
+  SECRET_KEY                  Session signing key
+  UPLOAD_TOKEN                Secret token used in /upload/{UPLOAD_TOKEN}
+  APP_BASE_URL                Public base URL (default: http://localhost:8725)
+  DATA_DIR                    SQLite/PDF storage directory (default: ./data)
+  MAX_UPLOAD_MB               Max total upload size (default: 50)
+  AUTO_INSTALL_IMAGEMAGICK    Best-effort ImageMagick install (default: true)
+
+Example:
+  export ADMIN_USERNAME=admin
+  export ADMIN_PASSWORD='replace-me'
+  export SECRET_KEY='replace-with-a-long-random-secret'
+  export UPLOAD_TOKEN='replace-with-a-secret-token'
+  export APP_BASE_URL='https://receipts.example.com'
+  export DATA_DIR='/var/lib/receipt-upload'
+  receipt-upload serve
+"""
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Manage and run the receipt-upload application.")
-    parser.add_argument("--env-file", default=".env", help="Environment file to update. Defaults to .env.")
+    parser = argparse.ArgumentParser(
+        description="Run the receipt-upload application using process environment variables.",
+        epilog=ENV_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     serve_parser = subparsers.add_parser("serve", help="Run the web application.")
@@ -31,14 +43,13 @@ def main() -> None:
     serve_parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload mode for development.")
     parser.set_defaults(host=DEFAULT_HOST, port=DEFAULT_PORT, reload=False)
 
-    _add_value_command(subparsers, "set-username", "ADMIN_USERNAME", "Admin username")
-    _add_value_command(subparsers, "set-password", "ADMIN_PASSWORD", "Admin password")
-    _add_value_command(subparsers, "set-upload-token", "UPLOAD_TOKEN", "Secret receipt upload URL token")
-    _add_value_command(subparsers, "set-base-url", "APP_BASE_URL", "Public base URL")
-    _add_value_command(subparsers, "set-data-dir", "DATA_DIR", "Application data directory")
-
-    secret_parser = subparsers.add_parser("generate-secret-key", help="Generate and save a random SECRET_KEY.")
+    secret_parser = subparsers.add_parser("generate-secret-key", help="Print a shell export for a random SECRET_KEY.")
     secret_parser.add_argument("--length", type=int, default=48, help="Generated secret length. Defaults to 48.")
+    secret_parser.add_argument("--raw", action="store_true", help="Print only the generated value.")
+
+    token_parser = subparsers.add_parser("generate-upload-token", help="Print a shell export for a random UPLOAD_TOKEN.")
+    token_parser.add_argument("--length", type=int, default=32, help="Generated token length. Defaults to 32.")
+    token_parser.add_argument("--raw", action="store_true", help="Print only the generated value.")
 
     banned_parser = subparsers.add_parser("list-banned-ips", help="List currently banned login IP addresses.")
     banned_parser.add_argument("--all", action="store_true", help="Show all login attempt records, not only active bans.")
@@ -48,21 +59,17 @@ def main() -> None:
 
     # Keep the original `receipt-upload --host ...` behavior as shorthand for `serve`.
     args = parser.parse_args(_normalize_serve_args())
-    env_path = Path(args.env_file)
 
     if args.command in {None, "serve"}:
         _serve(args)
         return
-    if args.command == "set-password":
-        value = args.value if args.value else _prompt_password()
-        _set_env(env_path, "ADMIN_PASSWORD", value)
-        print(f"Updated ADMIN_PASSWORD in {env_path}")
-        return
     if args.command == "generate-secret-key":
-        alphabet = string.ascii_letters + string.digits + "-_"
-        value = "".join(secrets.choice(alphabet) for _ in range(args.length))
-        _set_env(env_path, "SECRET_KEY", value)
-        print(f"Updated SECRET_KEY in {env_path}")
+        value = _generate_urlsafe_value(args.length)
+        _print_generated_env("SECRET_KEY", value, args.raw)
+        return
+    if args.command == "generate-upload-token":
+        value = _generate_urlsafe_value(args.length)
+        _print_generated_env("UPLOAD_TOKEN", value, args.raw)
         return
     if args.command == "list-banned-ips":
         _list_banned_ips(args.all)
@@ -70,36 +77,34 @@ def main() -> None:
     if args.command == "unban-ip":
         _unban_ip(args.id)
         return
-    for command_name, env_key in ENV_KEYS.items():
-        if args.command == f"set-{command_name}":
-            _set_env(env_path, env_key, args.value)
-            print(f"Updated {env_key} in {env_path}")
-            return
 
 
 def _normalize_serve_args() -> list[str] | None:
     import sys
 
-    if len(sys.argv) > 1 and sys.argv[1].startswith("--") and sys.argv[1] not in {"--env-file", "--help"}:
+    if len(sys.argv) > 1 and sys.argv[1].startswith("--") and sys.argv[1] != "--help":
         return ["serve", *sys.argv[1:]]
     return None
-
-
-def _add_value_command(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
-    name: str,
-    env_key: str,
-    help_text: str,
-) -> None:
-    command = subparsers.add_parser(name, help=f"Set {env_key} in .env.")
-    required = name != "set-password"
-    command.add_argument("value", nargs=None if required else "?", help=help_text)
 
 
 def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
     uvicorn.run("receipt_upload.main:app", host=args.host, port=args.port, reload=args.reload)
+
+
+def _generate_urlsafe_value(length: int) -> str:
+    if length < 1:
+        raise SystemExit("Length must be greater than zero.")
+    alphabet = string.ascii_letters + string.digits + "-_"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _print_generated_env(key: str, value: str, raw: bool) -> None:
+    if raw:
+        print(value)
+        return
+    print(f"export {key}={shlex.quote(value)}")
 
 
 def _list_banned_ips(show_all: bool) -> None:
@@ -150,40 +155,3 @@ def _unban_ip(login_attempt_id: int) -> None:
             raise SystemExit(f"No login attempt record found with ID {login_attempt_id}.")
         conn.execute("DELETE FROM login_attempts WHERE id = ?", (login_attempt_id,))
         print(f"Removed login attempt record {login_attempt_id} for {record['ip_address']}.")
-
-
-def _prompt_password() -> str:
-    password = getpass.getpass("Admin password: ")
-    confirmation = getpass.getpass("Confirm admin password: ")
-    if password != confirmation:
-        raise SystemExit("Passwords did not match.")
-    if not password:
-        raise SystemExit("Password cannot be empty.")
-    return password
-
-
-def _set_env(path: Path, key: str, value: str) -> None:
-    if not value:
-        raise SystemExit(f"{key} cannot be empty.")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = path.read_text().splitlines() if path.exists() else []
-    rendered = f"{key}={_quote_env_value(value)}"
-    updated = False
-    output: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and stripped.split("=", 1)[0].strip() == key:
-            output.append(rendered)
-            updated = True
-        else:
-            output.append(line)
-    if not updated:
-        output.append(rendered)
-    path.write_text("\n".join(output) + "\n")
-
-
-def _quote_env_value(value: str) -> str:
-    if not value or any(char.isspace() or char in "\"'#$" for char in value):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    return value

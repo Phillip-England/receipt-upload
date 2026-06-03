@@ -4,6 +4,7 @@
 <main class="auth-shell">
   <section class="auth-panel">
     <h1>receipt-upload</h1>
+    {% include "_default_credentials_warning.html" %}
     <form method="post" action="/admin/login" class="stack">
       {% if error %}<p class="alert">{{ error }}</p>{% endif %}
       <label>Username <input name="username" autocomplete="username" required></label>

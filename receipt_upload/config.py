@@ -17,20 +17,6 @@ DEFAULT_ENV = {
 }
 
 
-def _load_dotenv() -> None:
-    env_path = Path(".env")
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
-
-
 def _bool_env(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -63,7 +49,6 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    _load_dotenv()
     data_dir = Path(os.environ.get("DATA_DIR", DEFAULT_ENV["DATA_DIR"])).resolve()
     upload_dir = data_dir / "receipts"
     max_upload_mb = int(os.environ.get("MAX_UPLOAD_MB", DEFAULT_ENV["MAX_UPLOAD_MB"]))

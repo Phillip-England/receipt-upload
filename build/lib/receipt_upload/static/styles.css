@@ -137,6 +137,22 @@ th { color: var(--muted); font-size: 0.83rem; }
 }
 .alert { background: #fff1f0; color: var(--danger); }
 .success { background: #eaf8f1; color: var(--success); }
+.security-warning {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border: 1px solid #f2b8a2;
+  border-radius: 8px;
+  background: #fff4ed;
+  color: #7a2e12;
+  line-height: 1.45;
+}
+.auth-panel .security-warning { margin-bottom: 1rem; }
+.security-warning code {
+  font-size: 0.92em;
+  background: rgba(122, 46, 18, 0.08);
+  border-radius: 4px;
+  padding: 0.08rem 0.22rem;
+}
 
 @media (max-width: 760px) {
   .topbar { align-items: flex-start; flex-direction: column; }

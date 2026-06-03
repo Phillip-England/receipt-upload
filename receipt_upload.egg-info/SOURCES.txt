@@ -15,6 +15,7 @@ receipt_upload.egg-info/entry_points.txt
 receipt_upload.egg-info/requires.txt
 receipt_upload.egg-info/top_level.txt
 receipt_upload/static/styles.css
+receipt_upload/templates/_default_credentials_warning.html
 receipt_upload/templates/admin.html
 receipt_upload/templates/base.html
 receipt_upload/templates/login.html

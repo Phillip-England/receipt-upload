@@ -11,35 +11,134 @@ Requires-Dist: uvicorn[standard]>=0.35.0
 
 # receipt-upload
 
-A small FastAPI application for collecting cardholder receipts through a secret upload URL and managing them from a single admin portal.
+`receipt-upload` is a small receipt collection portal for one admin user.
 
-## Local setup
+The admin logs in, manages cardholders and stores, and reviews uploaded receipts. Cardholders do not have accounts. They receive a secret upload link, choose their name, enter receipt details, upload one or more receipt images, and the app converts those files into one PDF per expense.
+
+## Features
+
+- Single admin login configured by environment variables.
+- CLI helpers for generating secret values.
+- Secret cardholder upload URL: `/upload/{UPLOAD_TOKEN}`.
+- Cardholder management from the admin portal.
+- Store dropdown management from the admin portal.
+- Multiple receipt images per upload, merged into one PDF.
+- Uploaded PDFs stored on disk.
+- Receipt metadata stored in SQLite.
+- Admin receipt list with download, archive, and delete actions.
+- App disk usage shown on the admin dashboard.
+- Failed admin login protection with IP bans.
+- CLI commands to list and remove banned IPs.
+- Dockerfile for VPS deployment.
+
+## Requirements
+
+- Python 3.11 or newer.
+- `uv` for dependency management.
+- ImageMagick for receipt image to PDF conversion.
+
+The Docker image installs ImageMagick automatically. Outside Docker, the app checks for ImageMagick on startup and makes a best-effort attempt to install it when `AUTO_INSTALL_IMAGEMAGICK=true`.
+
+## Install Locally
+
+From the project directory:
 
 ```bash
-cp .env.example .env
 uv sync
-uv run uvicorn receipt_upload.main:app --reload
 ```
 
-Open `http://localhost:8725/admin/login`.
+Run the app without installing the CLI:
 
-The app reads configuration from environment variables. If a `.env` file exists, it is loaded automatically.
+```bash
+uv run receipt-upload
+```
 
-## CLI install
+The default app port is `8725`:
+
+```text
+http://localhost:8725/admin/login
+```
+
+## Install The CLI
+
+Install the `receipt-upload` command from this checkout:
 
 ```bash
 make install
-receipt-upload set-username admin
-receipt-upload set-password
-receipt-upload generate-secret-key
-receipt-upload set-upload-token your-secret-upload-token
+```
+
+Confirm it is available:
+
+```bash
+receipt-upload --help
+```
+
+Run the app:
+
+```bash
+receipt-upload
+```
+
+Or explicitly:
+
+```bash
 receipt-upload serve --host 0.0.0.0 --port 8725
 ```
 
-`receipt-upload --host 0.0.0.0 --port 8725` also works as a shorthand for `receipt-upload serve`.
-Configuration commands update `.env` in the current directory. Use `--env-file /path/to/.env` to write a different file.
+`receipt-upload --host 0.0.0.0 --port 8725` also works as shorthand for `receipt-upload serve`.
 
-Login ban recovery:
+## First-Time Setup
+
+The app reads configuration only from process environment variables. It does not load or write a `.env` file, so it behaves the same no matter which directory you run `receipt-upload` from.
+
+Set the variables in your shell, shell profile, service manager, Docker command, or hosting provider environment before starting the app:
+
+```bash
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='replace-this-password'
+export SECRET_KEY='replace-with-a-long-random-secret'
+export UPLOAD_TOKEN='replace-with-a-secret-token'
+export APP_BASE_URL='http://localhost:8725'
+export DATA_DIR='/var/lib/receipt-upload'
+```
+
+The default admin login is `admin` / `password`. The web UI shows a warning while either default credential is still active.
+
+Generate strong secret values:
+
+```bash
+receipt-upload generate-secret-key
+receipt-upload generate-upload-token
+```
+
+Those commands print shell-ready export lines. To set them in the current shell immediately:
+
+```bash
+eval "$(receipt-upload generate-secret-key)"
+eval "$(receipt-upload generate-upload-token)"
+```
+
+## CLI Reference
+
+Run the server:
+
+```bash
+receipt-upload
+receipt-upload serve
+receipt-upload serve --host 0.0.0.0 --port 8725
+receipt-upload serve --reload
+```
+
+Generate secret values:
+
+```bash
+receipt-upload generate-secret-key
+receipt-upload generate-secret-key --raw
+receipt-upload generate-upload-token
+receipt-upload generate-upload-token --raw
+```
+
+Manage login bans:
 
 ```bash
 receipt-upload list-banned-ips
@@ -47,37 +146,201 @@ receipt-upload list-banned-ips --all
 receipt-upload unban-ip 1
 ```
 
-The `Makefile` also includes `make sync`, `make run`, and `make clean`.
+`list-banned-ips` shows active bans. `list-banned-ips --all` shows all login attempt records, including IPs with failed attempts that are not currently banned.
 
-## Required environment variables
+## Environment Variables
 
-- `ADMIN_USERNAME`: admin login username.
-- `ADMIN_PASSWORD`: admin login password.
-- `SECRET_KEY`: signing key for the admin session cookie.
-- `UPLOAD_TOKEN`: secret token used in `/upload/{UPLOAD_TOKEN}`.
-- `APP_BASE_URL`: public base URL displayed in the admin portal.
-- `DATA_DIR`: SQLite database and PDF storage directory. Defaults to `./data`.
-- `MAX_UPLOAD_MB`: max total upload size per receipt submission. Defaults to `50`.
-- `AUTO_INSTALL_IMAGEMAGICK`: attempts a best-effort ImageMagick install if missing. Defaults to `true`.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ADMIN_USERNAME` | `admin` | Admin login username. |
+| `ADMIN_PASSWORD` | `password` | Admin login password. Change this before use. |
+| `SECRET_KEY` | `dev-secret-change-me` | Signs the admin session cookie. Use `generate-secret-key`. |
+| `UPLOAD_TOKEN` | `dev-upload-token` | Secret token used in `/upload/{UPLOAD_TOKEN}`. |
+| `APP_BASE_URL` | `http://localhost:8725` | Public URL shown in the admin portal for the upload link. |
+| `DATA_DIR` | `./data` | Directory for SQLite and uploaded receipt PDFs. |
+| `MAX_UPLOAD_MB` | `50` | Maximum total upload size per receipt submission. |
+| `AUTO_INSTALL_IMAGEMAGICK` | `true` | Best-effort ImageMagick install when missing. |
+
+Example shell exports:
+
+```bash
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD=password
+export SECRET_KEY=replace-with-a-long-random-secret
+export UPLOAD_TOKEN=replace-with-a-secret-token
+export APP_BASE_URL=https://receipts.example.com
+export DATA_DIR=/var/lib/receipt-upload
+export MAX_UPLOAD_MB=50
+export AUTO_INSTALL_IMAGEMAGICK=true
+```
+
+## Admin Usage
+
+1. Open `http://localhost:8725/admin/login`.
+2. Log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+3. Add cardholders.
+4. Add stores.
+5. Copy the secret upload link from the admin dashboard.
+6. Send that link to cardholders.
+7. Review uploads from the admin dashboard.
+8. Download, archive, or delete uploaded receipts as needed.
+
+The admin dashboard shows how much disk space the app is using under `DATA_DIR`.
+
+## Cardholder Usage
+
+Cardholders open the secret upload link and submit:
+
+- Their name.
+- Receipt total.
+- Purchase location.
+- Store to charge.
+- Optional note.
+- One or more receipt files.
+
+If multiple images are uploaded for one expense, the app merges them into one PDF.
+
+## Receipt Storage
+
+The app stores data under `DATA_DIR`.
+
+Default local layout:
+
+```text
+data/
+  app.sqlite3
+  receipts/
+    <generated-id>.pdf
+```
+
+SQLite stores metadata such as cardholder name, total, purchase location, selected store, note, timestamps, archive status, and PDF path.
+
+PDFs are saved directly on disk.
+
+## Login Ban System
+
+The admin login form tracks failed attempts by IP address.
+
+- 3 failed attempts bans the IP.
+- Bans last 24 hours.
+- Old login attempt records are purged automatically during login handling.
+- The table uses an integer `id` for each IP record so bans can be removed easily.
+
+List active bans:
+
+```bash
+receipt-upload list-banned-ips
+```
+
+Example output:
+
+```text
+ID     IP Address                                    Failures Last Attempt                     Banned Until
+2      203.0.113.88                                  3        2026-06-03T19:11:42+00:00       2026-06-04T19:11:42+00:00
+```
+
+Remove a ban:
+
+```bash
+receipt-upload unban-ip 2
+```
 
 ## Docker
 
+Build:
+
 ```bash
 docker build -t receipt-upload .
+```
+
+Run:
+
+```bash
 docker run --rm -p 8725:8725 \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD='replace-me' \
   -e SECRET_KEY='replace-with-a-long-random-secret' \
   -e UPLOAD_TOKEN='replace-with-a-secret-token' \
-  -e APP_BASE_URL='https://your-domain.example' \
+  -e APP_BASE_URL='https://receipts.example.com' \
   -v receipt-upload-data:/app/data \
   receipt-upload
 ```
 
-ImageMagick is installed in the container. Uploaded receipt PDFs and the SQLite database are stored under `/app/data`.
+ImageMagick is installed in the container. Uploaded PDFs and SQLite data are stored under `/app/data`.
 
-## Security notes
+## VPS Deployment Notes
 
-The admin login tracks failed attempts by IP address. Three failed attempts bans that IP for 24 hours. Login attempt records older than 24 hours are purged during login handling so the table remains bounded.
+Recommended production shape:
 
-Run this behind HTTPS in production. If deployed behind a reverse proxy, make sure it forwards `X-Forwarded-For` correctly.
+- Run the app on `127.0.0.1:8725` or `0.0.0.0:8725`.
+- Put Nginx, Caddy, or another reverse proxy in front of it.
+- Use HTTPS.
+- Set `APP_BASE_URL` to the public HTTPS URL.
+- Persist `DATA_DIR`.
+- Back up `DATA_DIR`.
+
+Example direct server run:
+
+```bash
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='replace-this-password'
+eval "$(receipt-upload generate-secret-key)"
+eval "$(receipt-upload generate-upload-token)"
+export APP_BASE_URL='https://receipts.example.com'
+export DATA_DIR='/var/lib/receipt-upload'
+receipt-upload serve --host 127.0.0.1 --port 8725
+```
+
+If deployed behind a reverse proxy, make sure it forwards the real client IP using `X-Forwarded-For`, because login bans use the request IP address.
+
+## Make Targets
+
+```bash
+make install
+make sync
+make run
+make clean
+```
+
+- `make install`: installs the CLI with `uv tool install --force .`.
+- `make sync`: installs project dependencies into `.venv`.
+- `make run`: runs the app on port `8725`.
+- `make clean`: removes local build artifacts and `.venv`.
+
+## Troubleshooting
+
+If the CLI is not found after `make install`, confirm `uv`'s tool bin directory is on your `PATH`:
+
+```bash
+which receipt-upload
+```
+
+If you lock yourself out while testing login failures:
+
+```bash
+receipt-upload list-banned-ips
+receipt-upload unban-ip <id>
+```
+
+If ImageMagick is missing, install it manually or run the Docker image. On macOS:
+
+```bash
+brew install imagemagick
+```
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y imagemagick
+```
+
+If the app starts with default credentials, confirm the variables are exported in the same shell or service environment that starts `receipt-upload`.
+
+## Security Notes
+
+- Change `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SECRET_KEY`, and `UPLOAD_TOKEN` before use.
+- Treat the upload URL as secret.
+- Use HTTPS in production.
+- Back up `DATA_DIR`.
+- Delete old uploads when disk usage grows.

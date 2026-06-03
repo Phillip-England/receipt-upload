@@ -7,7 +7,7 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 ## Features
 
 - Single admin login configured by environment variables.
-- CLI commands for setting admin username, password, secret key, upload token, base URL, and data directory.
+- CLI helpers for generating secret values.
 - Secret cardholder upload URL: `/upload/{UPLOAD_TOKEN}`.
 - Cardholder management from the admin portal.
 - Store dropdown management from the admin portal.
@@ -78,45 +78,33 @@ receipt-upload serve --host 0.0.0.0 --port 8725
 
 ## First-Time Setup
 
-The app reads configuration from environment variables. If a `.env` file exists in the current directory, it is loaded automatically.
+The app reads configuration only from process environment variables. It does not load or write a `.env` file, so it behaves the same no matter which directory you run `receipt-upload` from.
 
-Create `.env` with all supported variables set to sensible defaults:
-
-```bash
-receipt-upload init-env
-```
-
-This writes missing values without replacing values already present in `.env`. To reset every supported key to the built-in default:
+Set the variables in your shell, shell profile, service manager, Docker command, or hosting provider environment before starting the app:
 
 ```bash
-receipt-upload init-env --overwrite
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='replace-this-password'
+export SECRET_KEY='replace-with-a-long-random-secret'
+export UPLOAD_TOKEN='replace-with-a-secret-token'
+export APP_BASE_URL='http://localhost:8725'
+export DATA_DIR='/var/lib/receipt-upload'
 ```
 
-The default admin login is `admin` / `password`. The web UI shows a warning while either default credential is still active. Change the admin credentials manually with the CLI:
+The default admin login is `admin` / `password`. The web UI shows a warning while either default credential is still active.
 
-```bash
-receipt-upload set-username admin
-receipt-upload set-password
-```
-
-Before production use, also replace the secret key, upload token, and public base URL:
+Generate strong secret values:
 
 ```bash
 receipt-upload generate-secret-key
-receipt-upload set-upload-token your-secret-upload-token
-receipt-upload set-base-url http://localhost:8725
+receipt-upload generate-upload-token
 ```
 
-To set the password without an interactive prompt:
+Those commands print shell-ready export lines. To set them in the current shell immediately:
 
 ```bash
-receipt-upload set-password "replace-this-password"
-```
-
-To write a different env file:
-
-```bash
-receipt-upload --env-file /path/to/.env set-username admin
+eval "$(receipt-upload generate-secret-key)"
+eval "$(receipt-upload generate-upload-token)"
 ```
 
 ## CLI Reference
@@ -130,18 +118,13 @@ receipt-upload serve --host 0.0.0.0 --port 8725
 receipt-upload serve --reload
 ```
 
-Set configuration:
+Generate secret values:
 
 ```bash
-receipt-upload init-env
-receipt-upload init-env --overwrite
-receipt-upload set-username admin
-receipt-upload set-password
-receipt-upload set-password "new-password"
 receipt-upload generate-secret-key
-receipt-upload set-upload-token "secret-upload-token"
-receipt-upload set-base-url "https://receipts.example.com"
-receipt-upload set-data-dir "/var/lib/receipt-upload"
+receipt-upload generate-secret-key --raw
+receipt-upload generate-upload-token
+receipt-upload generate-upload-token --raw
 ```
 
 Manage login bans:
@@ -167,17 +150,17 @@ receipt-upload unban-ip 1
 | `MAX_UPLOAD_MB` | `50` | Maximum total upload size per receipt submission. |
 | `AUTO_INSTALL_IMAGEMAGICK` | `true` | Best-effort ImageMagick install when missing. |
 
-Example `.env`:
+Example shell exports:
 
-```env
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=password
-SECRET_KEY=replace-with-a-long-random-secret
-UPLOAD_TOKEN=replace-with-a-secret-token
-APP_BASE_URL=https://receipts.example.com
-DATA_DIR=/var/lib/receipt-upload
-MAX_UPLOAD_MB=50
-AUTO_INSTALL_IMAGEMAGICK=true
+```bash
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD=password
+export SECRET_KEY=replace-with-a-long-random-secret
+export UPLOAD_TOKEN=replace-with-a-secret-token
+export APP_BASE_URL=https://receipts.example.com
+export DATA_DIR=/var/lib/receipt-upload
+export MAX_UPLOAD_MB=50
+export AUTO_INSTALL_IMAGEMAGICK=true
 ```
 
 ## Admin Usage
@@ -288,12 +271,12 @@ Recommended production shape:
 Example direct server run:
 
 ```bash
-receipt-upload set-username admin
-receipt-upload set-password
-receipt-upload generate-secret-key
-receipt-upload set-upload-token "long-random-upload-token"
-receipt-upload set-base-url "https://receipts.example.com"
-receipt-upload set-data-dir "/var/lib/receipt-upload"
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='replace-this-password'
+eval "$(receipt-upload generate-secret-key)"
+eval "$(receipt-upload generate-upload-token)"
+export APP_BASE_URL='https://receipts.example.com'
+export DATA_DIR='/var/lib/receipt-upload'
 receipt-upload serve --host 127.0.0.1 --port 8725
 ```
 
@@ -341,7 +324,7 @@ sudo apt-get update
 sudo apt-get install -y imagemagick
 ```
 
-If the app starts with default credentials, your `.env` file may not be in the directory where you started `receipt-upload`, or the environment variables may not be exported.
+If the app starts with default credentials, confirm the variables are exported in the same shell or service environment that starts `receipt-upload`.
 
 ## Security Notes
 
