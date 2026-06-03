@@ -81,7 +81,7 @@
             <td>{{ upload.store_name or "Unassigned" }}</td>
             <td>{{ "Archived" if upload.archived_at else "Active" }}</td>
             <td class="actions">
-              <a class="button secondary" href="/admin/uploads/{{ upload.id }}/download">Download</a>
+              <a class="button secondary" href="/admin/uploads/{{ upload.id }}/download" data-download-link data-loading-text="Preparing PDF...">Download</a>
               {% if not upload.archived_at %}
               <form method="post" action="/admin/uploads/{{ upload.id }}/archive"><button class="secondary" type="submit">Archive</button></form>
               {% endif %}

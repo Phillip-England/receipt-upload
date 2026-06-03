@@ -8,5 +8,35 @@
   </head>
   <body>
     {% block body %}{% endblock %}
+    <script>
+      document.querySelectorAll("[data-loading-form]").forEach((form) => {
+        form.addEventListener("submit", () => {
+          form.classList.add("is-loading");
+          form.setAttribute("aria-busy", "true");
+          form.querySelectorAll("button[type='submit']").forEach((button) => {
+            button.dataset.originalText = button.textContent;
+            button.textContent = button.dataset.loadingText || "Working...";
+            button.disabled = true;
+          });
+        });
+      });
+
+      document.querySelectorAll("[data-download-link]").forEach((link) => {
+        link.addEventListener("click", () => {
+          if (link.classList.contains("is-loading")) {
+            return;
+          }
+          link.dataset.originalText = link.textContent;
+          link.textContent = link.dataset.loadingText || "Preparing...";
+          link.classList.add("is-loading");
+          link.setAttribute("aria-busy", "true");
+          window.setTimeout(() => {
+            link.textContent = link.dataset.originalText || "Download";
+            link.classList.remove("is-loading");
+            link.removeAttribute("aria-busy");
+          }, 8000);
+        });
+      });
+    </script>
   </body>
 </html>
