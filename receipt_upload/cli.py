@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import secrets
 import shlex
 import string
@@ -17,8 +18,12 @@ ENV_HELP = """Environment variables:
   DATA_DIR                    SQLite/PDF storage directory (default: ./data)
   MAX_UPLOAD_MB               Max total upload size (default: 50)
   AUTO_INSTALL_IMAGEMAGICK    Best-effort ImageMagick install (default: true)
+  RECEIPT_UPLOAD_CONFIG       Persistent defaults file path
 
 Example:
+  receipt-upload set-username admin
+  receipt-upload set-password
+  receipt-upload set-config APP_BASE_URL https://receipts.example.com
   export ADMIN_USERNAME=admin
   export ADMIN_PASSWORD='replace-me'
   export SECRET_KEY='replace-with-a-long-random-secret'
@@ -51,6 +56,20 @@ def main() -> None:
     token_parser.add_argument("--length", type=int, default=32, help="Generated token length. Defaults to 32.")
     token_parser.add_argument("--raw", action="store_true", help="Print only the generated value.")
 
+    username_parser = subparsers.add_parser("set-username", help="Persist a default admin username.")
+    username_parser.add_argument("username", help="Admin username to use when ADMIN_USERNAME is not set.")
+
+    password_parser = subparsers.add_parser("set-password", help="Persist a default admin password.")
+    password_parser.add_argument(
+        "password",
+        nargs="?",
+        help="Admin password to use when ADMIN_PASSWORD is not set. Omit to enter it securely.",
+    )
+
+    config_parser = subparsers.add_parser("set-config", help="Persist a default configuration value.")
+    config_parser.add_argument("name", choices=_config_keys(), help="Environment variable name to persist.")
+    config_parser.add_argument("value", help="Value to use when the environment variable is not set.")
+
     banned_parser = subparsers.add_parser("list-banned-ips", help="List currently banned login IP addresses.")
     banned_parser.add_argument("--all", action="store_true", help="Show all login attempt records, not only active bans.")
 
@@ -70,6 +89,16 @@ def main() -> None:
     if args.command == "generate-upload-token":
         value = _generate_urlsafe_value(args.length)
         _print_generated_env("UPLOAD_TOKEN", value, args.raw)
+        return
+    if args.command == "set-username":
+        _set_config_value("ADMIN_USERNAME", args.username, "admin username")
+        return
+    if args.command == "set-password":
+        password = args.password if args.password is not None else _prompt_password()
+        _set_config_value("ADMIN_PASSWORD", password, "admin password")
+        return
+    if args.command == "set-config":
+        _set_config_value(args.name, args.value, args.name)
         return
     if args.command == "list-banned-ips":
         _list_banned_ips(args.all)
@@ -105,6 +134,31 @@ def _print_generated_env(key: str, value: str, raw: bool) -> None:
         print(value)
         return
     print(f"export {key}={shlex.quote(value)}")
+
+
+def _config_keys() -> list[str]:
+    from receipt_upload.config import DEFAULT_ENV
+
+    return sorted(DEFAULT_ENV)
+
+
+def _set_config_value(key: str, value: str, label: str) -> None:
+    if not value:
+        raise SystemExit(f"{label.capitalize()} cannot be empty.")
+    from receipt_upload.config import save_config_value
+
+    path = save_config_value(key, value)
+    print(f"Saved default {label} to {path}.")
+
+
+def _prompt_password() -> str:
+    password = getpass.getpass("Admin password: ")
+    if not password:
+        raise SystemExit("Admin password cannot be empty.")
+    confirm = getpass.getpass("Confirm admin password: ")
+    if password != confirm:
+        raise SystemExit("Passwords did not match.")
+    return password
 
 
 def _list_banned_ips(show_all: bool) -> None:

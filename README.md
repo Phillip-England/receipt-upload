@@ -78,9 +78,31 @@ receipt-upload serve --host 0.0.0.0 --port 8725
 
 ## First-Time Setup
 
-The app reads configuration only from process environment variables. It does not load or write a `.env` file, so it behaves the same no matter which directory you run `receipt-upload` from.
+The app can store user-level default configuration without a `.env` file. Runtime environment variables still take priority, so shell exports, service-manager settings, Docker `-e` values, and hosting-provider environment values override saved defaults.
 
-Set the variables in your shell, shell profile, service manager, Docker command, or hosting provider environment before starting the app:
+Set persistent default admin credentials:
+
+```bash
+receipt-upload set-username admin
+receipt-upload set-password
+```
+
+You can also pass the password directly:
+
+```bash
+receipt-upload set-password 'replace-this-password'
+```
+
+Saved defaults are written to your platform config directory. Set `RECEIPT_UPLOAD_CONFIG` if you need a specific config file path.
+
+Other app settings can be persisted the same way:
+
+```bash
+receipt-upload set-config APP_BASE_URL https://receipts.example.com
+receipt-upload set-config DATA_DIR /var/lib/receipt-upload
+```
+
+For service or hosted deployments, set variables before starting the app:
 
 ```bash
 export ADMIN_USERNAME=admin
@@ -118,6 +140,21 @@ receipt-upload serve --host 0.0.0.0 --port 8725
 receipt-upload serve --reload
 ```
 
+Persist default admin credentials:
+
+```bash
+receipt-upload set-username admin
+receipt-upload set-password
+receipt-upload set-password 'replace-this-password'
+```
+
+Persist any supported default setting:
+
+```bash
+receipt-upload set-config APP_BASE_URL https://receipts.example.com
+receipt-upload set-config DATA_DIR /var/lib/receipt-upload
+```
+
 Generate secret values:
 
 ```bash
@@ -149,6 +186,7 @@ receipt-upload unban-ip 1
 | `DATA_DIR` | `./data` | Directory for SQLite and uploaded receipt PDFs. |
 | `MAX_UPLOAD_MB` | `50` | Maximum total upload size per receipt submission. |
 | `AUTO_INSTALL_IMAGEMAGICK` | `true` | Best-effort ImageMagick install when missing. |
+| `RECEIPT_UPLOAD_CONFIG` | Platform config path | Persistent defaults file path. |
 
 Example shell exports:
 
