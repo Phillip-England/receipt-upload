@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% set title = "Admin Login" %}
+{% block body %}
+<main class="auth-shell">
+  <section class="auth-panel">
+    <h1>receipt-upload</h1>
+    <form method="post" action="/admin/login" class="stack">
+      {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+      <label>Username <input name="username" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Log in</button>
+    </form>
+  </section>
+</main>
+{% endblock %}

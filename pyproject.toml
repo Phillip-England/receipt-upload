@@ -1,0 +1,25 @@
+[project]
+name = "receipt-upload"
+version = "0.1.5"
+description = "Single-admin receipt upload portal"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.116.0",
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.20",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[project.scripts]
+receipt-upload = "receipt_upload.cli:main"
+
+[build-system]
+requires = ["setuptools>=80.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["receipt_upload*"]
+
+[tool.setuptools.package-data]
+receipt_upload = ["templates/*.html", "static/*.css"]

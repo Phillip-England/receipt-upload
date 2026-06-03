@@ -1,0 +1,2 @@
+[console_scripts]
+receipt-upload = receipt_upload.cli:main

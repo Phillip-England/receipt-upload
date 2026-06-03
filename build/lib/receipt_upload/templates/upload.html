@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set title = "Upload Receipt" %}
+{% block body %}
+<main class="upload-shell">
+  <section class="upload-panel">
+    <h1>Upload Receipt</h1>
+    {% if success %}<p class="success">{{ success }}</p>{% endif %}
+    {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="/upload/{{ token }}" enctype="multipart/form-data" class="stack">
+      <label>
+        Cardholder
+        <select name="cardholder_id" required>
+          <option value="">Select a name</option>
+          {% for cardholder in cardholders %}
+          <option value="{{ cardholder.id }}">{{ cardholder.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Total <input name="total" inputmode="decimal" placeholder="42.50" required></label>
+      <label>Purchased At <input name="purchase_location" placeholder="Vendor or location" required></label>
+      <label>
+        Store
+        <select name="store_id">
+          <option value="">Unassigned</option>
+          {% for store in stores %}
+          <option value="{{ store.id }}">{{ store.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Note <textarea name="note" rows="4"></textarea></label>
+      <label>Receipt Images <input name="files" type="file" multiple accept="image/*,.pdf" required></label>
+      <button type="submit">Upload</button>
+    </form>
+  </section>
+</main>
+{% endblock %}

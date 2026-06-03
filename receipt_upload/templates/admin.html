@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% set title = "Admin" %}
+{% block body %}
+<header class="topbar">
+  <div>
+    <h1>receipt-upload</h1>
+    <p>{{ disk_usage }} used by this app</p>
+  </div>
+  <form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form>
+</header>
+
+<main class="admin-grid">
+  <section class="wide">
+    {% include "_default_credentials_warning.html" %}
+  </section>
+
+  <section class="panel wide">
+    <h2>Secret Upload Link</h2>
+    <div class="copy-row">
+      <input readonly value="{{ settings.upload_url }}">
+      <a class="button" href="{{ settings.upload_url }}" target="_blank">Open</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Cardholders</h2>
+    <form class="inline-form" method="post" action="/admin/cardholders">
+      <input name="name" placeholder="Name" required>
+      <button type="submit">Add</button>
+    </form>
+    <ul class="manage-list">
+      {% for cardholder in cardholders %}
+      <li>
+        <span>{{ cardholder.name }}</span>
+        <form method="post" action="/admin/cardholders/{{ cardholder.id }}/delete">
+          <button class="danger secondary" type="submit">Remove</button>
+        </form>
+      </li>
+      {% else %}
+      <li class="empty">No cardholders yet.</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="panel">
+    <h2>Stores</h2>
+    <form class="inline-form" method="post" action="/admin/stores">
+      <input name="name" placeholder="Store" required>
+      <button type="submit">Add</button>
+    </form>
+    <ul class="manage-list">
+      {% for store in stores %}
+      <li>
+        <span>{{ store.name }}</span>
+        <form method="post" action="/admin/stores/{{ store.id }}/delete">
+          <button class="danger secondary" type="submit">Remove</button>
+        </form>
+      </li>
+      {% else %}
+      <li class="empty">No stores yet.</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="panel wide">
+    <h2>Uploads</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Store</th><th>Status</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for upload in uploads %}
+          <tr class="{{ 'muted' if upload.archived_at else '' }}">
+            <td>{{ upload.created_at }}</td>
+            <td>{{ upload.cardholder_name }}</td>
+            <td>{{ upload.total }}</td>
+            <td>{{ upload.purchase_location }}</td>
+            <td>{{ upload.store_name or "Unassigned" }}</td>
+            <td>{{ "Archived" if upload.archived_at else "Active" }}</td>
+            <td class="actions">
+              <a class="button secondary" href="/admin/uploads/{{ upload.id }}/download">Download</a>
+              {% if not upload.archived_at %}
+              <form method="post" action="/admin/uploads/{{ upload.id }}/archive"><button class="secondary" type="submit">Archive</button></form>
+              {% endif %}
+              <form method="post" action="/admin/uploads/{{ upload.id }}/delete"><button class="danger secondary" type="submit">Delete</button></form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="empty">No receipts uploaded yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+{% endblock %}
