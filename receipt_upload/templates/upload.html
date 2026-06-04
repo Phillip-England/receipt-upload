@@ -28,7 +28,17 @@
         </select>
       </label>
       <label>Note <textarea name="note" rows="4"></textarea></label>
-      <label>Receipt Images <input name="files" type="file" multiple accept="image/*,.pdf" required></label>
+      <label>
+        Receipt Images
+        <input name="files" type="file" multiple accept="image/*,.pdf" required data-append-files data-file-list="receipt-file-list">
+      </label>
+      <div class="file-selection" aria-live="polite">
+        <div class="file-selection-header">
+          <span id="receipt-file-count">No files selected</span>
+          <button class="secondary" type="button" data-clear-files>Clear</button>
+        </div>
+        <ul id="receipt-file-list" class="selected-files"></ul>
+      </div>
       <button type="submit" data-loading-text="Uploading...">Upload</button>
       <div class="loading-status" role="status" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
