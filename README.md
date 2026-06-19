@@ -8,7 +8,7 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 
 - Axum-based Rust web app.
 - Single admin login configured by environment variables or saved CLI defaults.
-- Secret cardholder upload URL: `/upload/{UPLOAD_TOKEN}`.
+- Admin-managed secret cardholder upload URL: `/upload/{UPLOAD_TOKEN}`.
 - Cardholder and store management from the admin portal.
 - Multiple store checkboxes per receipt.
 - Multiple receipt images per upload, resized and merged into one PDF.
@@ -121,12 +121,13 @@ receipt-upload unban-ip 1
 2. Log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 3. Add cardholders.
 4. Add stores.
-5. Copy the secret upload link from the admin dashboard.
+5. Set the secret code and copy the resulting upload link from the admin dashboard.
 6. Send that link to cardholders.
 7. Review uploads from the admin dashboard.
 8. Download, archive, or delete uploaded receipts as needed.
 
 The admin dashboard shows how much disk space the app is using under `DATA_DIR`.
+Changing the secret code disables the previous upload link immediately. The admin-selected code is stored in the application database and takes priority over `UPLOAD_TOKEN` on later starts.
 
 ## Cardholder Usage
 

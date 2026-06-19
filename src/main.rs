@@ -20,7 +20,7 @@ use std::{
     env, fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use subtle::ConstantTimeEq;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -39,6 +39,16 @@ const STYLE_CSS: &str = include_str!("styles.css");
 #[derive(Clone)]
 struct AppState {
     settings: Arc<Settings>,
+    upload_token: Arc<RwLock<String>>,
+}
+
+impl AppState {
+    fn current_upload_token(&self) -> String {
+        self.upload_token
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -80,11 +90,11 @@ impl Settings {
         self.data_dir.join("app.sqlite3")
     }
 
-    fn upload_url(&self) -> String {
+    fn upload_url(&self, upload_token: &str) -> String {
         format!(
             "{}/upload/{}",
             self.app_base_url.trim_end_matches('/'),
-            self.upload_token
+            upload_token
         )
     }
 
@@ -185,14 +195,19 @@ async fn serve(host: String, port: u16) -> Result<()> {
     let settings = Arc::new(Settings::load()?);
     fs::create_dir_all(&settings.upload_dir)?;
     init_db(&settings.db_path())?;
+    let upload_token = load_upload_token(&settings)?;
     let max_body_bytes = settings.max_upload_bytes + 1024 * 1024;
-    let state = AppState { settings };
+    let state = AppState {
+        settings,
+        upload_token: Arc::new(RwLock::new(upload_token)),
+    };
     let app = Router::new()
         .route("/", get(root))
         .route("/static/styles.css", get(styles))
         .route("/admin/login", get(login_page).post(login))
         .route("/admin/logout", post(logout))
         .route("/admin", get(admin_dashboard))
+        .route("/admin/upload-link", post(update_upload_link))
         .route("/admin/cardholders", post(add_cardholder))
         .route("/admin/cardholders/{id}/delete", post(delete_cardholder))
         .route("/admin/stores", post(add_store))
@@ -309,9 +324,54 @@ async fn admin_dashboard(State(state): State<AppState>, headers: HeaderMap) -> R
         return redirect_login();
     }
     match load_admin_view(&state.settings) {
-        Ok(view) => Html(render_admin(&state.settings, &view)).into_response(),
+        Ok(view) => Html(render_admin(
+            &state.settings,
+            &state.current_upload_token(),
+            &view,
+            None,
+        ))
+        .into_response(),
         Err(err) => server_error(err),
     }
+}
+
+#[derive(Deserialize)]
+struct UploadLinkForm {
+    secret_code: String,
+}
+
+async fn update_upload_link(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<UploadLinkForm>,
+) -> Response {
+    if !is_admin(&headers, &state.settings) {
+        return redirect_login();
+    }
+    let secret_code = form.secret_code.trim();
+    if let Err(error) = validate_upload_token(secret_code) {
+        return match load_admin_view(&state.settings) {
+            Ok(view) => (
+                StatusCode::BAD_REQUEST,
+                Html(render_admin(
+                    &state.settings,
+                    &state.current_upload_token(),
+                    &view,
+                    Some(error),
+                )),
+            )
+                .into_response(),
+            Err(err) => server_error(err),
+        };
+    }
+    if let Err(err) = save_upload_token(&state.settings, secret_code) {
+        return server_error(err);
+    }
+    *state
+        .upload_token
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = secret_code.to_string();
+    Redirect::to("/admin").into_response()
 }
 
 #[derive(Deserialize)]
@@ -495,7 +555,7 @@ async fn download_upload(
 }
 
 async fn upload_page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
-    if !ct_eq(&token, &state.settings.upload_token) {
+    if !ct_eq(&token, &state.current_upload_token()) {
         return StatusCode::NOT_FOUND.into_response();
     }
     match load_upload_options(&state.settings) {
@@ -509,7 +569,7 @@ async fn receive_upload(
     Path(token): Path<String>,
     multipart: Multipart,
 ) -> Response {
-    if !ct_eq(&token, &state.settings.upload_token) {
+    if !ct_eq(&token, &state.current_upload_token()) {
         return StatusCode::NOT_FOUND.into_response();
     }
     match handle_upload(&state.settings, multipart).await {
@@ -794,6 +854,10 @@ fn init_db(db_path: &FsPath) -> Result<()> {
                 last_attempt_at TEXT NOT NULL,
                 banned_until TEXT
             );
+            CREATE TABLE IF NOT EXISTS app_settings (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
         add_column_if_missing(conn, "uploads", "description", "TEXT")?;
@@ -802,6 +866,43 @@ fn init_db(db_path: &FsPath) -> Result<()> {
         migrate_login_attempt_ids(conn)?;
         Ok(())
     })
+}
+
+fn load_upload_token(settings: &Settings) -> Result<String> {
+    with_conn(&settings.db_path(), |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE name = 'UPLOAD_TOKEN'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| settings.upload_token.clone()))
+    })
+}
+
+fn save_upload_token(settings: &Settings, upload_token: &str) -> Result<()> {
+    with_conn(&settings.db_path(), |conn| {
+        conn.execute(
+            "INSERT INTO app_settings (name, value) VALUES ('UPLOAD_TOKEN', ?) \
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            [upload_token],
+        )?;
+        Ok(())
+    })
+}
+
+fn validate_upload_token(upload_token: &str) -> std::result::Result<(), &'static str> {
+    if !(8..=128).contains(&upload_token.len()) {
+        return Err("The secret code must be between 8 and 128 characters.");
+    }
+    if !upload_token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Use only letters, numbers, hyphens, and underscores in the secret code.");
+    }
+    Ok(())
 }
 
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ty: &str) -> Result<()> {
@@ -957,7 +1058,12 @@ fn render_login(settings: &Settings, error: Option<&str>) -> String {
     )
 }
 
-fn render_admin(settings: &Settings, view: &AdminView) -> String {
+fn render_admin(
+    settings: &Settings,
+    upload_token: &str,
+    view: &AdminView,
+    upload_link_error: Option<&str>,
+) -> String {
     let cardholders = if view.cardholders.is_empty() {
         r#"<li class="empty">No cardholders yet.</li>"#.to_string()
     } else {
@@ -989,10 +1095,12 @@ fn render_admin(settings: &Settings, view: &AdminView) -> String {
     layout(
         "Admin",
         &format!(
-            r#"<header class="topbar"><div><h1>receipt-upload</h1><p>{disk_usage} used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">{warning}</section><section class="panel wide"><h2>Secret Upload Link</h2><div class="copy-row"><input readonly value="{upload_url}"><a class="button" href="{upload_url}" target="_blank">Open</a></div></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">{cardholders}</ul></section><section class="panel"><h2>Stores</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Store" required><button type="submit">Add</button></form><ul class="manage-list">{stores}</ul></section><section class="panel wide"><h2>Uploads</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Stores</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>{uploads}</tbody></table></div></section></main>"#,
+            r#"<header class="topbar"><div><h1>receipt-upload</h1><p>{disk_usage} used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">{warning}</section><section class="panel wide"><h2>Secret Upload Link</h2>{upload_link_error}<div class="copy-row"><input readonly value="{upload_url}" aria-label="Current secret upload link"><a class="button" href="{upload_url}" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Secret code <input name="secret_code" value="{upload_token}" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">Changing the code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">{cardholders}</ul></section><section class="panel"><h2>Stores</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Store" required><button type="submit">Add</button></form><ul class="manage-list">{stores}</ul></section><section class="panel wide"><h2>Uploads</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Stores</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>{uploads}</tbody></table></div></section></main>"#,
             disk_usage = view.disk_usage,
             warning = default_warning(settings),
-            upload_url = esc(&settings.upload_url()),
+            upload_link_error = message("alert", upload_link_error),
+            upload_url = esc(&settings.upload_url(upload_token)),
+            upload_token = esc(upload_token),
             cardholders = cardholders,
             stores = stores,
             uploads = uploads,
@@ -1382,6 +1490,37 @@ mod tests {
     use super::*;
     use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
     use std::io::Cursor;
+
+    #[test]
+    fn upload_tokens_are_url_safe_and_long_enough() {
+        assert!(validate_upload_token("client-2026_A").is_ok());
+        assert!(validate_upload_token("short").is_err());
+        assert!(validate_upload_token("not/a/path").is_err());
+        assert!(validate_upload_token("contains spaces").is_err());
+    }
+
+    #[test]
+    fn admin_upload_token_persists_in_database() -> Result<()> {
+        let data_dir = env::temp_dir().join(format!("receipt-upload-test-{}", Uuid::new_v4()));
+        let settings = Settings {
+            admin_username: "admin".into(),
+            admin_password: "password".into(),
+            secret_key: "test-secret".into(),
+            upload_token: "configured-token".into(),
+            app_base_url: "http://localhost:8725".into(),
+            upload_dir: data_dir.join("receipts"),
+            data_dir: data_dir.clone(),
+            max_upload_bytes: 1024,
+        };
+        init_db(&settings.db_path())?;
+        assert_eq!(load_upload_token(&settings)?, "configured-token");
+
+        save_upload_token(&settings, "admin-selected-token")?;
+        assert_eq!(load_upload_token(&settings)?, "admin-selected-token");
+
+        fs::remove_dir_all(data_dir)?;
+        Ok(())
+    }
 
     #[test]
     fn uploaded_images_are_resized_and_written_as_pdf_pages() -> Result<()> {
