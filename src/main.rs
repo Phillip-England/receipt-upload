@@ -40,11 +40,19 @@ const STYLE_CSS: &str = include_str!("styles.css");
 struct AppState {
     settings: Arc<Settings>,
     upload_token: Arc<RwLock<String>>,
+    app_base_url: Arc<RwLock<String>>,
 }
 
 impl AppState {
     fn current_upload_token(&self) -> String {
         self.upload_token
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn current_app_base_url(&self) -> String {
+        self.app_base_url
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -90,10 +98,10 @@ impl Settings {
         self.data_dir.join("app.sqlite3")
     }
 
-    fn upload_url(&self, upload_token: &str) -> String {
+    fn upload_url(app_base_url: &str, upload_token: &str) -> String {
         format!(
             "{}/upload/{}",
-            self.app_base_url.trim_end_matches('/'),
+            app_base_url.trim_end_matches('/'),
             upload_token
         )
     }
@@ -196,10 +204,12 @@ async fn serve(host: String, port: u16) -> Result<()> {
     fs::create_dir_all(&settings.upload_dir)?;
     init_db(&settings.db_path())?;
     let upload_token = load_upload_token(&settings)?;
+    let app_base_url = load_app_base_url(&settings)?;
     let max_body_bytes = settings.max_upload_bytes + 1024 * 1024;
     let state = AppState {
         settings,
         upload_token: Arc::new(RwLock::new(upload_token)),
+        app_base_url: Arc::new(RwLock::new(app_base_url)),
     };
     let app = Router::new()
         .route("/", get(root))
@@ -327,6 +337,7 @@ async fn admin_dashboard(State(state): State<AppState>, headers: HeaderMap) -> R
         Ok(view) => Html(render_admin(
             &state.settings,
             &state.current_upload_token(),
+            &state.current_app_base_url(),
             &view,
             None,
         ))
@@ -338,6 +349,7 @@ async fn admin_dashboard(State(state): State<AppState>, headers: HeaderMap) -> R
 #[derive(Deserialize)]
 struct UploadLinkForm {
     secret_code: String,
+    app_base_url: String,
 }
 
 async fn update_upload_link(
@@ -349,13 +361,17 @@ async fn update_upload_link(
         return redirect_login();
     }
     let secret_code = form.secret_code.trim();
-    if let Err(error) = validate_upload_token(secret_code) {
+    let app_base_url = form.app_base_url.trim().trim_end_matches('/');
+    let validation =
+        validate_upload_token(secret_code).and_then(|_| validate_app_base_url(app_base_url));
+    if let Err(error) = validation {
         return match load_admin_view(&state.settings) {
             Ok(view) => (
                 StatusCode::BAD_REQUEST,
                 Html(render_admin(
                     &state.settings,
                     &state.current_upload_token(),
+                    &state.current_app_base_url(),
                     &view,
                     Some(error),
                 )),
@@ -364,13 +380,17 @@ async fn update_upload_link(
             Err(err) => server_error(err),
         };
     }
-    if let Err(err) = save_upload_token(&state.settings, secret_code) {
+    if let Err(err) = save_upload_link(&state.settings, secret_code, app_base_url) {
         return server_error(err);
     }
     *state
         .upload_token
         .write()
         .unwrap_or_else(|e| e.into_inner()) = secret_code.to_string();
+    *state
+        .app_base_url
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = app_base_url.to_string();
     Redirect::to("/admin").into_response()
 }
 
@@ -881,13 +901,33 @@ fn load_upload_token(settings: &Settings) -> Result<String> {
     })
 }
 
-fn save_upload_token(settings: &Settings, upload_token: &str) -> Result<()> {
+fn load_app_base_url(settings: &Settings) -> Result<String> {
     with_conn(&settings.db_path(), |conn| {
-        conn.execute(
+        Ok(conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE name = 'APP_BASE_URL'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| settings.app_base_url.clone()))
+    })
+}
+
+fn save_upload_link(settings: &Settings, upload_token: &str, app_base_url: &str) -> Result<()> {
+    with_conn(&settings.db_path(), |conn| {
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "INSERT INTO app_settings (name, value) VALUES ('APP_BASE_URL', ?) \
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            [app_base_url],
+        )?;
+        transaction.execute(
             "INSERT INTO app_settings (name, value) VALUES ('UPLOAD_TOKEN', ?) \
              ON CONFLICT(name) DO UPDATE SET value = excluded.value",
             [upload_token],
         )?;
+        transaction.commit()?;
         Ok(())
     })
 }
@@ -901,6 +941,19 @@ fn validate_upload_token(upload_token: &str) -> std::result::Result<(), &'static
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err("Use only letters, numbers, hyphens, and underscores in the secret code.");
+    }
+    Ok(())
+}
+
+fn validate_app_base_url(app_base_url: &str) -> std::result::Result<(), &'static str> {
+    let Ok(uri) = app_base_url.parse::<http::Uri>() else {
+        return Err("Enter a valid public URL, including http:// or https://.");
+    };
+    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.host().is_none() {
+        return Err("Enter a valid public URL, including http:// or https://.");
+    }
+    if uri.query().is_some() {
+        return Err("The public URL cannot contain a query string.");
     }
     Ok(())
 }
@@ -1061,6 +1114,7 @@ fn render_login(settings: &Settings, error: Option<&str>) -> String {
 fn render_admin(
     settings: &Settings,
     upload_token: &str,
+    app_base_url: &str,
     view: &AdminView,
     upload_link_error: Option<&str>,
 ) -> String {
@@ -1095,11 +1149,12 @@ fn render_admin(
     layout(
         "Admin",
         &format!(
-            r#"<header class="topbar"><div><h1>receipt-upload</h1><p>{disk_usage} used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">{warning}</section><section class="panel wide"><h2>Secret Upload Link</h2>{upload_link_error}<div class="copy-row"><input readonly value="{upload_url}" aria-label="Current secret upload link"><a class="button" href="{upload_url}" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Secret code <input name="secret_code" value="{upload_token}" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">Changing the code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">{cardholders}</ul></section><section class="panel"><h2>Stores</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Store" required><button type="submit">Add</button></form><ul class="manage-list">{stores}</ul></section><section class="panel wide"><h2>Uploads</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Stores</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>{uploads}</tbody></table></div></section></main>"#,
+            r#"<header class="topbar"><div><h1>receipt-upload</h1><p>{disk_usage} used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">{warning}</section><section class="panel wide"><h2>Secret Upload Link</h2>{upload_link_error}<div class="copy-row"><input readonly value="{upload_url}" aria-label="Current secret upload link"><a class="button" href="{upload_url}" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Public hostname / base URL <input name="app_base_url" type="url" value="{app_base_url}" placeholder="https://receipts.example.com" autocomplete="url" required></label><label>Secret code <input name="secret_code" value="{upload_token}" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">The public URL is saved for future links. Changing the secret code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">{cardholders}</ul></section><section class="panel"><h2>Stores</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Store" required><button type="submit">Add</button></form><ul class="manage-list">{stores}</ul></section><section class="panel wide"><h2>Uploads</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Stores</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>{uploads}</tbody></table></div></section></main>"#,
             disk_usage = view.disk_usage,
             warning = default_warning(settings),
             upload_link_error = message("alert", upload_link_error),
-            upload_url = esc(&settings.upload_url(upload_token)),
+            upload_url = esc(&Settings::upload_url(app_base_url, upload_token)),
+            app_base_url = esc(app_base_url),
             upload_token = esc(upload_token),
             cardholders = cardholders,
             stores = stores,
@@ -1500,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_upload_token_persists_in_database() -> Result<()> {
+    fn admin_upload_link_settings_persist_in_database() -> Result<()> {
         let data_dir = env::temp_dir().join(format!("receipt-upload-test-{}", Uuid::new_v4()));
         let settings = Settings {
             admin_username: "admin".into(),
@@ -1514,12 +1569,30 @@ mod tests {
         };
         init_db(&settings.db_path())?;
         assert_eq!(load_upload_token(&settings)?, "configured-token");
+        assert_eq!(load_app_base_url(&settings)?, "http://localhost:8725");
 
-        save_upload_token(&settings, "admin-selected-token")?;
+        save_upload_link(
+            &settings,
+            "admin-selected-token",
+            "https://receipts.example.com",
+        )?;
         assert_eq!(load_upload_token(&settings)?, "admin-selected-token");
+        assert_eq!(
+            load_app_base_url(&settings)?,
+            "https://receipts.example.com"
+        );
 
         fs::remove_dir_all(data_dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn public_base_urls_require_an_http_hostname() {
+        assert!(validate_app_base_url("https://receipts.example.com").is_ok());
+        assert!(validate_app_base_url("http://localhost:8725").is_ok());
+        assert!(validate_app_base_url("receipts.example.com").is_err());
+        assert!(validate_app_base_url("javascript:alert(1)").is_err());
+        assert!(validate_app_base_url("https://receipts.example.com?bad=1").is_err());
     }
 
     #[test]

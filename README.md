@@ -121,13 +121,13 @@ receipt-upload unban-ip 1
 2. Log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 3. Add cardholders.
 4. Add stores.
-5. Set the secret code and copy the resulting upload link from the admin dashboard.
+5. Set the public hostname and secret code, then copy the resulting upload link from the admin dashboard.
 6. Send that link to cardholders.
 7. Review uploads from the admin dashboard.
 8. Download, archive, or delete uploaded receipts as needed.
 
 The admin dashboard shows how much disk space the app is using under `DATA_DIR`.
-Changing the secret code disables the previous upload link immediately. The admin-selected code is stored in the application database and takes priority over `UPLOAD_TOKEN` on later starts.
+Changing the secret code disables the previous upload link immediately. The admin-selected public URL and code are stored in the application database and take priority over `APP_BASE_URL` and `UPLOAD_TOKEN` on later starts.
 
 ## Cardholder Usage
 
