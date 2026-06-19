@@ -141,7 +141,6 @@ enum Commands {
     UnbanIp {
         id: i64,
     },
-    InstallDeps,
 }
 
 #[tokio::main]
@@ -171,15 +170,6 @@ async fn main() -> Result<()> {
             .map(|p| println!("Saved default {name} to {}.", p.display())),
         Commands::ListBannedIps { all } => list_banned_ips(all),
         Commands::UnbanIp { id } => unban_ip(id),
-        Commands::InstallDeps => {
-            println!(
-                "No runtime image conversion dependency is required. The Rust binary uses bundled SQLite and built-in image/PDF processing."
-            );
-            println!(
-                "Build dependencies: Rust stable toolchain and a C compiler for bundled SQLite."
-            );
-            Ok(())
-        }
     }
 }
 
@@ -338,16 +328,16 @@ async fn add_cardholder(
         return redirect_login();
     }
     let name = form.name.trim();
-    if !name.is_empty() {
-        if let Err(err) = with_conn(&state.settings.db_path(), |conn| {
+    if !name.is_empty()
+        && let Err(err) = with_conn(&state.settings.db_path(), |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cardholders (name) VALUES (?)",
                 [name],
             )?;
             Ok(())
-        }) {
-            return server_error(err);
-        }
+        })
+    {
+        return server_error(err);
     }
     Redirect::to("/admin").into_response()
 }
@@ -378,13 +368,13 @@ async fn add_store(
         return redirect_login();
     }
     let name = form.name.trim();
-    if !name.is_empty() {
-        if let Err(err) = with_conn(&state.settings.db_path(), |conn| {
+    if !name.is_empty()
+        && let Err(err) = with_conn(&state.settings.db_path(), |conn| {
             conn.execute("INSERT OR IGNORE INTO stores (name) VALUES (?)", [name])?;
             Ok(())
-        }) {
-            return server_error(err);
-        }
+        })
+    {
+        return server_error(err);
     }
     Redirect::to("/admin").into_response()
 }
@@ -1385,4 +1375,42 @@ fn unban_ip(id: i64) -> Result<()> {
         println!("Removed login attempt record {id} for {ip}.");
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+    use std::io::Cursor;
+
+    #[test]
+    fn uploaded_images_are_resized_and_written_as_pdf_pages() -> Result<()> {
+        let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(
+            MAX_IMAGE_DIMENSION + 400,
+            900,
+            Rgb([240, 240, 240]),
+        ));
+        let mut encoded = Cursor::new(Vec::new());
+        source.write_to(&mut encoded, ImageFormat::Png)?;
+
+        let image = prepare_pdf_image(encoded.get_ref())?;
+        assert_eq!(image.width, MAX_IMAGE_DIMENSION);
+        assert!(image.height < 900);
+        assert!(image.jpeg.starts_with(&[0xff, 0xd8]));
+
+        let output = env::temp_dir().join(format!("receipt-upload-test-{}.pdf", Uuid::new_v4()));
+        write_pdf(&[image], &output)?;
+        let pdf = fs::read(&output)?;
+        fs::remove_file(output)?;
+
+        assert!(pdf.starts_with(b"%PDF-1.4"));
+        assert!(pdf.ends_with(b"%%EOF\n"));
+        assert_eq!(
+            pdf.windows(b"/Type /Page ".len())
+                .filter(|window| *window == b"/Type /Page ")
+                .count(),
+            1
+        );
+        Ok(())
+    }
 }

@@ -1,7 +1,7 @@
 .PHONY: install sync run check clean
 
 install:
-	cargo install --path . --force
+	cargo install --locked --path . --force
 
 sync:
 	cargo fetch

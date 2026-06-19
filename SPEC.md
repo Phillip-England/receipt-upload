@@ -26,18 +26,17 @@
 - db no grow forever
 - cli make clearing bans easy
 
-# Easy Dep Installation
-- cli make deps installation easy
-- user no need to think about deps installation
-- cli make easy for linux, mac, and wsl
-- no need deep windows support
+# Standalone Runtime
+- app must not install, locate, or invoke a separate receipt-processing executable
+- receipt image processing and PDF generation live in receipt-upload
+- no runtime dependency installation command is needed
 
 # Built Using Rust
 - use axum framework
 - build using rust
 
 # Makefile
-- make install should install the cli
+- make install should compile all Rust dependencies and install the complete app in one command
 
 # Cardholders
 - admin create cardholders by name
@@ -83,10 +82,8 @@
 
 # Dockerize
 - application should have Dockerfile
-- Dockerfile no manage deps installation
-- Dockerfile only install rust and receipt-upload cli
-- receipt-upload cli then manage deps installtion
-- deps easy to install using cli
+- Docker image contains only the receipt-upload application and its runtime system packages
+- receipt-upload contains its image processing and PDF generation functionality directly
 - make deployment easier
 
 # Speed of Upload/Download

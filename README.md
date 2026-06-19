@@ -27,35 +27,31 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 - Rust stable toolchain.
 - A C compiler for bundled SQLite builds.
 
-No external image conversion dependency is required. Image resizing and PDF generation happen inside the Rust binary.
+No external command or image conversion package is required. Cargo compiles image decoding, resizing, PDF generation, and bundled SQLite support into `receipt-upload` itself.
 
-## Install Locally
+## Install
 
-From the project directory:
-
-```bash
-cargo fetch
-cargo run
-```
-
-The default app port is `8725`:
-
-```text
-http://localhost:8725/admin/login
-```
-
-## Install The CLI
-
-Install the `receipt-upload` command from this checkout:
+From the project directory, one command installs the app and all of its Rust dependencies:
 
 ```bash
 make install
 ```
 
-Run the app:
+This is equivalent to:
+
+```bash
+cargo install --locked --path . --force
+```
+
+No separate PDF dependency setup is needed. Start the installed app with:
 
 ```bash
 receipt-upload
+```
+
+The default admin URL is `http://localhost:8725/admin/login`. To select another bind address or port:
+
+```bash
 receipt-upload serve --host 0.0.0.0 --port 8725
 ```
 
@@ -104,10 +100,7 @@ receipt-upload generate-upload-token --raw
 receipt-upload list-banned-ips
 receipt-upload list-banned-ips --all
 receipt-upload unban-ip 1
-receipt-upload install-deps
 ```
-
-`install-deps` reports the external requirements for this Rust build. There is no runtime image conversion package to install.
 
 ## Environment Variables
 
