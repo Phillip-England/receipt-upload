@@ -7,7 +7,7 @@ sync:
 	cargo fetch
 
 run:
-	cargo run -- serve --config ./config/.env --host 0.0.0.0 --port 8725
+	cargo run -- serve --host 0.0.0.0 --port 8725
 
 check:
 	cargo fmt --check
@@ -15,3 +15,10 @@ check:
 
 clean:
 	rm -rf target
+
+docker:
+	docker build -t receipt-upload . && docker run --rm \
+	       	-p 8725:8725 \
+		-v $(pwd)/config:/app/config \
+		-v $(pwd)/data:/app/data \
+	       	receipt-upload 
