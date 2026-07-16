@@ -19,6 +19,6 @@ clean:
 docker:
 	docker build -t receipt-upload . && docker run --rm \
 	       	-p 8725:8725 \
-		-v $(PWD)/config:/app/config \
-		-v $(PWD)/data:/app/data \
+		-v $(CURDIR)/config:/app/config \
+		-v $(CURDIR)/data:/app/data \
 	       	receipt-upload 
