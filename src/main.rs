@@ -122,7 +122,7 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        default_value = "/config/app.env",
+        default_value = "./config/.env",
         value_name = "PATH"
     )]
     config: PathBuf,
@@ -132,9 +132,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize the local configuration and database.
+    Init {
+        #[arg(long, default_value = "./data", value_name = "PATH")]
+        data_dir: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    Database {
+        #[command(subcommand)]
+        command: DatabaseCommands,
     },
     Serve {
         #[arg(long, default_value = "0.0.0.0")]
@@ -176,12 +187,20 @@ enum Commands {
 #[derive(Subcommand)]
 enum ConfigCommands {
     Init {
-        #[arg(long)]
+        #[arg(long, default_value = "./config/.env")]
         path: PathBuf,
         #[arg(long)]
         force: bool,
     },
     Check,
+}
+
+#[derive(Subcommand)]
+enum DatabaseCommands {
+    Init {
+        #[arg(long, default_value = "./data", value_name = "PATH")]
+        data_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -192,9 +211,13 @@ async fn main() -> Result<()> {
         host: "0.0.0.0".into(),
         port: 8725,
     }) {
+        Commands::Init { data_dir, force } => init_app(&cli.config, &data_dir, force),
         Commands::Config { command } => match command {
             ConfigCommands::Init { path, force } => init_config_file(&path, force),
             ConfigCommands::Check => check_config_file(&cli.config),
+        },
+        Commands::Database { command } => match command {
+            DatabaseCommands::Init { data_dir } => init_data_dir(&data_dir),
         },
         Commands::Serve { host, port } => serve(&cli.config, host, port).await,
         Commands::GenerateSecretKey { length, raw } => print_generated("SECRET_KEY", length, raw),
@@ -225,7 +248,9 @@ fn normalize_args() -> Vec<String> {
     let has_command = args.iter().skip(1).any(|arg| {
         matches!(
             arg.as_str(),
-            "config"
+            "init"
+                | "config"
+                | "database"
                 | "serve"
                 | "generate-secret-key"
                 | "generate-upload-token"
@@ -1546,7 +1571,29 @@ fn parse_positive_usize(values: &HashMap<String, String>, name: &str) -> Result<
     Ok(parsed)
 }
 
+fn init_app(config_path: &FsPath, data_dir: &FsPath, force: bool) -> Result<()> {
+    init_config_file_with_data_dir(config_path, data_dir, force)?;
+    init_data_dir(data_dir)?;
+    println!("initialization complete");
+    Ok(())
+}
+
+fn init_data_dir(data_dir: &FsPath) -> Result<()> {
+    let upload_dir = data_dir.join("receipts");
+    fs::create_dir_all(&upload_dir)
+        .with_context(|| format!("could not create data directory {}", data_dir.display()))?;
+    let db_path = data_dir.join("app.sqlite3");
+    init_db(&db_path)?;
+    println!("initialized database at {}", db_path.display());
+    println!("initialized receipt storage at {}", upload_dir.display());
+    Ok(())
+}
+
 fn init_config_file(path: &FsPath, force: bool) -> Result<()> {
+    init_config_file_with_data_dir(path, FsPath::new("./data"), force)
+}
+
+fn init_config_file_with_data_dir(path: &FsPath, data_dir: &FsPath, force: bool) -> Result<()> {
     if path.exists() && !force {
         bail!(
             "configuration error: {} already exists; use --force to overwrite it",
@@ -1557,9 +1604,10 @@ fn init_config_file(path: &FsPath, force: bool) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let content = format!(
-        "ADMIN_USERNAME=admin\nADMIN_PASSWORD=REPLACE_ME\nSECRET_KEY={}\nUPLOAD_TOKEN={}\nAPP_BASE_URL=http://localhost:8725\nDATA_DIR=./data\nMAX_UPLOAD_MB=50\n",
+        "ADMIN_USERNAME=admin\nADMIN_PASSWORD=REPLACE_ME\nSECRET_KEY={}\nUPLOAD_TOKEN={}\nAPP_BASE_URL=http://localhost:8725\nDATA_DIR={}\nMAX_UPLOAD_MB=50\n",
         random_alphanumeric(48),
         random_alphanumeric(32),
+        quote_env_value(&data_dir.to_string_lossy()),
     );
     write_restricted(path, &content, force)?;
     println!("initialized configuration at {}", path.display());
@@ -1815,6 +1863,36 @@ mod tests {
                 0o600
             );
         }
+
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn app_init_creates_config_database_and_receipt_storage() -> Result<()> {
+        let dir = env::temp_dir().join(format!("receipt-upload-init-test-{}", Uuid::new_v4()));
+        let config_path = dir.join("config").join(".env");
+        let data_dir = dir.join("data");
+
+        init_app(&config_path, &data_dir, false)?;
+
+        assert!(config_path.is_file());
+        assert!(data_dir.join("app.sqlite3").is_file());
+        assert!(data_dir.join("receipts").is_dir());
+        let values = load_config_file(&config_path)?;
+        assert_eq!(
+            required_config(&values, "DATA_DIR")?,
+            data_dir.to_string_lossy()
+        );
+        with_conn(&data_dir.join("app.sqlite3"), |conn| {
+            let table: String = conn.query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'uploads'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(table, "uploads");
+            Ok(())
+        })?;
 
         fs::remove_dir_all(dir)?;
         Ok(())

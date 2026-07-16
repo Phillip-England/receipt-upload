@@ -43,10 +43,12 @@ This is equivalent to:
 cargo install --locked --path . --force
 ```
 
-No separate PDF dependency setup is needed. Start the installed app with:
+No separate PDF dependency setup is needed. Initialize and start the installed app with:
 
 ```bash
-receipt-upload --config ./runtime/app.env
+receipt-upload init
+# Edit ADMIN_PASSWORD in ./config/.env, then:
+receipt-upload
 ```
 
 The default admin URL is `http://localhost:8725/admin/login`. To select another bind address or port:
@@ -59,25 +61,34 @@ receipt-upload serve --config ./runtime/app.env --host 0.0.0.0 --port 8725
 
 ## First-Time Setup
 
-Create an explicit runtime configuration file:
+Initialize the configuration, SQLite database, and receipt storage:
 
 ```bash
-receipt-upload config init --path ./runtime/app.env
+receipt-upload init
 ```
+
+This creates `./config/.env`, `./data/app.sqlite3`, and `./data/receipts/`.
 
 Edit `ADMIN_PASSWORD` before real use, then validate the file without starting the server:
 
 ```bash
-receipt-upload config check --config ./runtime/app.env
+receipt-upload config check
 ```
 
 Start the app only after validation succeeds:
 
 ```bash
-receipt-upload serve --config ./runtime/app.env
+receipt-upload serve
 ```
 
-The selected configuration source is always supplied with `--config`. If omitted, the conventional default path is `/config/app.env`.
+The defaults are `./config/.env` and `./data`. Custom locations can be initialized with:
+
+```bash
+receipt-upload init --config ./runtime/app.env --data-dir /var/lib/receipt-upload
+```
+
+To initialize only one part, use `receipt-upload config init` or
+`receipt-upload database init`.
 
 Existing config files can be edited with the CLI:
 
@@ -91,6 +102,10 @@ receipt-upload set-config --config ./runtime/app.env DATA_DIR /var/lib/receipt-u
 ## CLI Reference
 
 ```bash
+receipt-upload init
+receipt-upload init --force
+receipt-upload init --config ./runtime/app.env --data-dir /var/lib/receipt-upload
+receipt-upload database init
 receipt-upload --config ./runtime/app.env
 receipt-upload serve --config ./runtime/app.env
 receipt-upload serve --config ./runtime/app.env --host 0.0.0.0 --port 8725
@@ -193,12 +208,13 @@ Run:
 
 ```bash
 docker run --rm -p 8725:8725 \
-  -v "$PWD/runtime/app.env:/config/app.env:ro" \
+  -v "$PWD/config/.env:/app/config/.env:ro" \
   -v receipt-upload-data:/app/data \
   receipt-upload
 ```
 
-Uploaded PDFs and SQLite data are stored under the configured `DATA_DIR`. For the Docker command above, set `DATA_DIR=/app/data` in `runtime/app.env`.
+Uploaded PDFs and SQLite data are stored under the configured `DATA_DIR`. For the
+Docker command above, set `DATA_DIR=/app/data` in `config/.env`.
 
 ## Make Targets
 
