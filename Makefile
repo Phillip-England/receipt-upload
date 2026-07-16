@@ -1,24 +1,24 @@
 .PHONY: install sync run check clean
 
 install:
-	cargo install --locked --path . --force
+	go install .
 
 sync:
-	cargo fetch
+	go mod download
 
 run:
-	cargo run -- serve --host 0.0.0.0 --port 8725
+	go run . serve --host 0.0.0.0 --port 8725
 
 check:
-	cargo fmt --check
-	cargo check
+	gofmt -w main.go
+	go test ./...
 
 clean:
-	rm -rf target
+	rm -rf receipt-upload
 
 docker:
 	docker build -t receipt-upload . && docker run --rm \
 	       	-p 8725:8725 \
-		-v $(pwd)/config:/app/config \
-		-v $(pwd)/data:/app/data \
+		-v $(PWD)/config:/app/config \
+		-v $(PWD)/data:/app/data \
 	       	receipt-upload 

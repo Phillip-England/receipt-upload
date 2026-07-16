@@ -31,12 +31,12 @@
 - receipt image processing and PDF generation live in receipt-upload
 - no runtime dependency installation command is needed
 
-# Built Using Rust
-- use axum framework
-- build using rust
+# Built Using Go
+- use Go net/http
+- build using go
 
 # Makefile
-- make install should compile all Rust dependencies and install the complete app in one command
+- make install should compile all Go dependencies and install the complete app in one command
 
 # Cardholders
 - admin create cardholders by name
@@ -98,24 +98,17 @@
 - super useful for cardholder
 
 # Deps in Use
-- axum for HTTP routing, forms, multipart uploads
-- tokio for async runtime
-- rusqlite with bundled SQLite for single-file database
-- clap for receipt-upload CLI
-- serde and serde_json for persistent config file
-- hmac, sha2, base64, subtle for signed admin session cookie
+- Go net/http for HTTP routing, forms, multipart uploads
+- database/sql with mattn/go-sqlite3 for single-file database
+- crypto/hmac, sha256, base64 for signed admin session cookie
 - time for timestamps and login ban windows
-- image for image decoding, resizing, and JPEG compression
-- uuid for unique PDF filenames
-- rand and rpassword for secret generation and password prompt
-- html-escape for server-rendered HTML escaping
-- dirs for platform config directory discovery
-- anyhow for simple application error handling
-- no external image conversion runtime dependency; Rust handles resize and PDF generation
+- standard image packages plus x/image for image decoding, resizing, and JPEG compression
+- google/uuid for unique PDF filenames
+- no external image conversion runtime dependency; Go handles resize and PDF generation
 
 # Spec Clarifications Added During Migration
 - stores are many-to-many with receipts using checkboxes and a receipt_stores table
-- upload accepts receipt images only, not PDFs, because the Rust speed path resizes images before creating the final PDF
+- upload accepts receipt images only, not PDFs, because the Go speed path resizes images before creating the final PDF
 - each image is resized to max 1600px on the longest side and JPEG-compressed before PDF generation
 - browser also attempts client-side resizing before upload to reduce phone-camera upload size
 - external image conversion install setting removed because no external image conversion dependency remains

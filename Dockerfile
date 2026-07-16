@@ -1,7 +1,6 @@
-FROM rust:1.88
+FROM golang:1.24
 WORKDIR /app
 COPY . .
-RUN cargo install --path .
+RUN go build -o /usr/local/bin/receipt-upload .
 EXPOSE 8725
 CMD ["receipt-upload"]
-

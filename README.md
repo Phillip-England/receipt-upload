@@ -1,12 +1,12 @@
 # receipt-upload
 
-`receipt-upload` is a small Rust receipt collection portal for one admin user.
+`receipt-upload` is a small Go receipt collection portal for one admin user.
 
 The admin logs in, manages cardholders and stores, and reviews uploaded receipts. Cardholders do not have accounts. They receive a secret upload link, choose their name, enter receipt details, upload one or more receipt images, and the app creates one compressed PDF per expense.
 
 ## Features
 
-- Axum-based Rust web app.
+- Go `net/http` web app.
 - Single admin login configured by an explicit environment-style config file.
 - Admin-managed secret cardholder upload URL: `/upload/{UPLOAD_TOKEN}`.
 - Cardholder and store management from the admin portal.
@@ -24,14 +24,14 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 
 ## Requirements
 
-- Rust stable toolchain.
-- A C compiler for bundled SQLite builds.
+- Go toolchain.
+- A C compiler for the SQLite driver.
 
-No external command or image conversion package is required. Cargo compiles image decoding, resizing, PDF generation, and bundled SQLite support into `receipt-upload` itself.
+No external command or image conversion package is required. Go compiles image decoding, resizing, PDF generation, and SQLite support into `receipt-upload` itself.
 
 ## Install
 
-From the project directory, one command installs the app and all of its Rust dependencies:
+From the project directory, one command installs the app and all of its Go dependencies:
 
 ```bash
 make install
@@ -40,7 +40,7 @@ make install
 This is equivalent to:
 
 ```bash
-cargo install --locked --path . --force
+go install .
 ```
 
 No separate PDF dependency setup is needed. Initialize and start the installed app with:
