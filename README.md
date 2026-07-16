@@ -51,7 +51,7 @@ receipt-upload init
 receipt-upload
 ```
 
-The default admin URL is `http://localhost:8725/admin/login`. To select another bind address or port:
+The developer documentation is served at `http://localhost:8725/`. The admin-only login portal is at `http://localhost:8725/admin/login`. To select another bind address or port:
 
 ```bash
 receipt-upload serve --config ./runtime/app.env --host 0.0.0.0 --port 8725

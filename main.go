@@ -39,7 +39,7 @@ import (
 	"golang.org/x/term"
 )
 
-//go:embed src/styles.css
+//go:embed src/styles.css static/logo.png
 var embedded embed.FS
 
 const (
@@ -359,6 +359,7 @@ func serve(configPath, host, port string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.root)
 	mux.HandleFunc("/static/styles.css", styles)
+	mux.HandleFunc("/static/logo.png", logo)
 	mux.HandleFunc("/admin/login", app.login)
 	mux.HandleFunc("/admin/logout", app.logout)
 	mux.HandleFunc("/admin", app.adminDashboard)
@@ -393,13 +394,28 @@ func uploadURL(base, token string) string {
 }
 
 func (a *App) root(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeHTML(w, renderDocs())
 }
 
 func styles(w http.ResponseWriter, r *http.Request) {
 	css, _ := embedded.ReadFile("src/styles.css")
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Write(css)
+}
+
+func logo(w http.ResponseWriter, r *http.Request) {
+	data, _ := embedded.ReadFile("static/logo.png")
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
@@ -1043,7 +1059,30 @@ func uploadRows(db *sql.DB) ([]UploadRow, error) {
 }
 
 func renderLogin(settings Settings, errMsg string) string {
-	return layout("Login", fmt.Sprintf(`<main class="auth-shell"><section class="auth-panel"><h1>receipt-upload</h1>%s%s<form method="post" action="/admin/login" class="stack"><label>Username <input name="username" autocomplete="username" required autofocus></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Log in</button></form></section></main>`, defaultWarning(settings), message("alert", errMsg)))
+	return layout("Admin login", fmt.Sprintf(`<main class="auth-shell"><section class="auth-panel"><a class="brand auth-brand" href="/"><img src="/static/logo.png" alt=""><span>receipt-upload</span></a><div class="auth-heading"><p class="eyebrow">Administrator portal</p><h1>Sign in to manage receipts</h1><p>Cardholders do not need an account. This portal is only for the application administrator.</p></div>%s%s<form method="post" action="/admin/login" class="stack"><label>Username <input name="username" autocomplete="username" required autofocus></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Admin sign in</button></form><a class="back-link" href="/">← Back to documentation</a></section></main>`, defaultWarning(settings), message("alert", errMsg)))
+}
+
+func renderDocs() string {
+	body := `<header class="docs-nav"><a class="brand" href="/"><img src="/static/logo.png" alt=""><span>receipt-upload</span></a><nav aria-label="Primary"><a href="#quick-start">Quick start</a><a href="#workflow">Workflow</a><a class="button secondary" href="/admin/login">Admin portal</a></nav></header>
+<main class="docs-shell"><section class="docs-hero"><div><p class="eyebrow">Self-hosted receipt collection</p><h1>Receipt uploads without user accounts or heavyweight infrastructure.</h1><p class="hero-copy">A small Go application for collecting phone-camera receipts through a private link, combining images into compact PDFs, and giving one administrator a clean review queue.</p><div class="hero-actions"><a class="button" href="#quick-start">Get started</a><a class="button secondary" href="/admin/login">Admin sign in</a></div></div><div class="hero-mark"><img src="/static/logo.png" alt="Receipt with an upload arrow"><span>Single binary · SQLite · Local storage</span></div></section>
+<section class="docs-section" id="quick-start"><div class="section-intro"><p class="eyebrow">Quick start</p><h2>Run it locally in a few commands</h2><p>Build the binary, initialize its config and data directory, replace the default password, then start the server.</p></div><div class="code-panel"><div class="code-title"><span>Terminal</span><span>bash</span></div><pre><code>make install
+receipt-upload init
+# Edit ADMIN_PASSWORD in ./config/.env
+receipt-upload config check
+receipt-upload serve</code></pre></div><div class="callout"><strong>Default address</strong><span>Documentation is available at <code>http://localhost:8725/</code>. Administration lives at <code>/admin/login</code>.</span></div></section>
+<section class="docs-section" id="workflow"><div class="section-intro"><p class="eyebrow">How it works</p><h2>One administrator, simple links for everyone else</h2></div><div class="step-grid"><article><span class="step-number">01</span><h3>Configure</h3><p>The admin creates cardholders and stores, then chooses the public hostname and secret upload code.</p></article><article><span class="step-number">02</span><h3>Share</h3><p>Send the generated private upload URL to cardholders. They do not create accounts or sign in.</p></article><article><span class="step-number">03</span><h3>Collect</h3><p>Cardholders select their name, add expense details, and attach one or more receipt photos.</p></article><article><span class="step-number">04</span><h3>Review</h3><p>The app resizes images, builds one PDF per expense, and makes it available in the admin portal.</p></article></div></section>
+<section class="docs-section"><div class="section-intro"><p class="eyebrow">Configuration</p><h2>Environment-style config file</h2><p>The application reads the file passed with <code>--config</code> (default: <code>./config/.env</code>). Runtime environment variables are not merged in.</p></div><div class="config-list"><div><code>ADMIN_USERNAME</code><span>Administrator login name</span></div><div><code>ADMIN_PASSWORD</code><span>Administrator password</span></div><div><code>SECRET_KEY</code><span>Signs admin session cookies</span></div><div><code>UPLOAD_TOKEN</code><span>Initial private upload-link token</span></div><div><code>APP_BASE_URL</code><span>Public origin used when building links</span></div><div><code>DATA_DIR</code><span>SQLite database and receipt PDFs</span></div><div><code>MAX_UPLOAD_MB</code><span>Maximum size of one submission</span></div></div></section>
+<section class="docs-section"><div class="section-intro"><p class="eyebrow">Deployment</p><h2>Docker or a standalone binary</h2></div><div class="deploy-grid"><div><h3>Standalone</h3><pre><code>receipt-upload serve \
+  --config ./runtime/app.env \
+  --host 0.0.0.0 \
+  --port 8725</code></pre></div><div><h3>Docker</h3><pre><code>docker build -t receipt-upload .
+docker run --rm -p 8725:8725 \
+  -v "$PWD/config/.env:/app/config/.env:ro" \
+  -v receipt-upload-data:/app/data \
+  receipt-upload</code></pre></div></div><p class="docs-note">Persist <code>DATA_DIR</code>. It contains both <code>app.sqlite3</code> and generated receipt PDFs.</p></section>
+<section class="docs-section"><div class="section-intro"><p class="eyebrow">Operational notes</p><h2>Designed to stay small</h2></div><div class="feature-grid"><article><h3>Image processing included</h3><p>Phone photos are resized to a maximum 1600px dimension and JPEG-compressed before PDF generation. No external converter is required.</p></article><article><h3>Local, portable data</h3><p>Metadata lives in one SQLite database and receipt PDFs live beside it under the configured data directory.</p></article><article><h3>Protected administration</h3><p>Three failed login attempts ban an IP for 24 hours. The CLI can list and remove ban records.</p></article></div></section></main>
+<footer class="docs-footer"><a class="brand" href="/"><img src="/static/logo.png" alt=""><span>receipt-upload</span></a><p>Simple receipt collection for teams that own their infrastructure.</p></footer>`
+	return layout("receipt-upload — Developer documentation", body)
 }
 
 func renderAdmin(settings Settings, uploadToken, appBaseURL string, view AdminView, uploadLinkError string) string {
@@ -1107,7 +1146,7 @@ func renderUpload(token string, view UploadOptions, errMsg, success string) stri
 }
 
 func layout(title, body string) string {
-	return fmt.Sprintf(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title><link rel="stylesheet" href="/static/styles.css"></head><body>%s<script>%s</script></body></html>`, esc(title), body, clientJS)
+	return fmt.Sprintf(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title><link rel="icon" type="image/png" href="/static/logo.png"><link rel="stylesheet" href="/static/styles.css"></head><body>%s<script>%s</script></body></html>`, esc(title), body, clientJS)
 }
 
 const clientJS = `
