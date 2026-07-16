@@ -18,6 +18,7 @@ use sha2::Sha256;
 use std::{
     collections::HashMap,
     env, fs,
+    io::Write,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, RwLock},
@@ -72,22 +73,22 @@ struct Settings {
 }
 
 impl Settings {
-    fn load() -> Result<Self> {
-        let saved = load_saved_config()?;
-        let data_dir = PathBuf::from(config_value(&saved, "DATA_DIR"))
+    fn load(config_path: &FsPath) -> Result<Self> {
+        let values = load_config_file(config_path)?;
+        validate_config_values(&values)?;
+        let data_dir_value = required_config(&values, "DATA_DIR")?;
+        let data_dir = PathBuf::from(&data_dir_value)
             .canonicalize()
-            .unwrap_or_else(|_| {
-                PathBuf::from(config_value(&saved, "DATA_DIR"))
-                    .components()
-                    .collect()
-            });
-        let max_upload_mb: usize = config_value(&saved, "MAX_UPLOAD_MB").parse().unwrap_or(50);
+            .unwrap_or_else(|_| PathBuf::from(data_dir_value).components().collect());
+        let max_upload_mb = parse_positive_usize(&values, "MAX_UPLOAD_MB")?;
+        let upload_token = required_config(&values, "UPLOAD_TOKEN")?;
+        let app_base_url = required_config(&values, "APP_BASE_URL")?;
         Ok(Self {
-            admin_username: config_value(&saved, "ADMIN_USERNAME"),
-            admin_password: config_value(&saved, "ADMIN_PASSWORD"),
-            secret_key: config_value(&saved, "SECRET_KEY"),
-            upload_token: config_value(&saved, "UPLOAD_TOKEN"),
-            app_base_url: config_value(&saved, "APP_BASE_URL"),
+            admin_username: required_config(&values, "ADMIN_USERNAME")?,
+            admin_password: required_config(&values, "ADMIN_PASSWORD")?,
+            secret_key: required_config(&values, "SECRET_KEY")?,
+            upload_token,
+            app_base_url,
             upload_dir: data_dir.join("receipts"),
             data_dir,
             max_upload_bytes: max_upload_mb * 1024 * 1024,
@@ -118,12 +119,23 @@ impl Settings {
     about = "Run the receipt upload portal."
 )]
 struct Cli {
+    #[arg(
+        long,
+        global = true,
+        default_value = "/config/app.env",
+        value_name = "PATH"
+    )]
+    config: PathBuf,
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     Serve {
         #[arg(long, default_value = "0.0.0.0")]
         host: String,
@@ -161,6 +173,17 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigCommands {
+    Init {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    Check,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = normalize_args();
@@ -169,38 +192,58 @@ async fn main() -> Result<()> {
         host: "0.0.0.0".into(),
         port: 8725,
     }) {
-        Commands::Serve { host, port } => serve(host, port).await,
+        Commands::Config { command } => match command {
+            ConfigCommands::Init { path, force } => init_config_file(&path, force),
+            ConfigCommands::Check => check_config_file(&cli.config),
+        },
+        Commands::Serve { host, port } => serve(&cli.config, host, port).await,
         Commands::GenerateSecretKey { length, raw } => print_generated("SECRET_KEY", length, raw),
         Commands::GenerateUploadToken { length, raw } => {
             print_generated("UPLOAD_TOKEN", length, raw)
         }
-        Commands::SetUsername { username } => save_config_value("ADMIN_USERNAME", &username)
-            .map(|p| println!("Saved default admin username to {}.", p.display())),
+        Commands::SetUsername { username } => {
+            save_config_value(&cli.config, "ADMIN_USERNAME", &username)
+                .map(|p| println!("Saved ADMIN_USERNAME to {}.", p.display()))
+        }
         Commands::SetPassword { password } => {
             let password = match password {
                 Some(value) => value,
                 None => prompt_password()?,
             };
-            save_config_value("ADMIN_PASSWORD", &password)
-                .map(|p| println!("Saved default admin password to {}.", p.display()))
+            save_config_value(&cli.config, "ADMIN_PASSWORD", &password)
+                .map(|p| println!("Saved ADMIN_PASSWORD to {}.", p.display()))
         }
-        Commands::SetConfig { name, value } => save_config_value(&name, &value)
-            .map(|p| println!("Saved default {name} to {}.", p.display())),
-        Commands::ListBannedIps { all } => list_banned_ips(all),
-        Commands::UnbanIp { id } => unban_ip(id),
+        Commands::SetConfig { name, value } => save_config_value(&cli.config, &name, &value)
+            .map(|p| println!("Saved {name} to {}.", p.display())),
+        Commands::ListBannedIps { all } => list_banned_ips(&cli.config, all),
+        Commands::UnbanIp { id } => unban_ip(&cli.config, id),
     }
 }
 
 fn normalize_args() -> Vec<String> {
     let mut args: Vec<String> = env::args().collect();
-    if args.len() > 1 && args[1].starts_with("--") && args[1] != "--help" {
+    let has_command = args.iter().skip(1).any(|arg| {
+        matches!(
+            arg.as_str(),
+            "config"
+                | "serve"
+                | "generate-secret-key"
+                | "generate-upload-token"
+                | "set-username"
+                | "set-password"
+                | "set-config"
+                | "list-banned-ips"
+                | "unban-ip"
+        )
+    });
+    if args.len() > 1 && args[1].starts_with("--") && args[1] != "--help" && !has_command {
         args.insert(1, "serve".to_string());
     }
     args
 }
 
-async fn serve(host: String, port: u16) -> Result<()> {
-    let settings = Arc::new(Settings::load()?);
+async fn serve(config_path: &FsPath, host: String, port: u16) -> Result<()> {
+    let settings = Arc::new(Settings::load(config_path)?);
     fs::create_dir_all(&settings.upload_dir)?;
     init_db(&settings.db_path())?;
     let upload_token = load_upload_token(&settings)?;
@@ -230,6 +273,7 @@ async fn serve(host: String, port: u16) -> Result<()> {
         .with_state(state);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = TcpListener::bind(addr).await?;
+    println!("loaded configuration from {}", config_path.display());
     println!("receipt-upload listening on http://{addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -1375,81 +1419,241 @@ fn human_bytes(size: u64) -> String {
     format!("{size} B")
 }
 
-fn default_env() -> HashMap<&'static str, &'static str> {
-    HashMap::from([
-        ("ADMIN_USERNAME", "admin"),
-        ("ADMIN_PASSWORD", "password"),
-        ("SECRET_KEY", "dev-secret-change-me"),
-        ("UPLOAD_TOKEN", "dev-upload-token"),
-        ("APP_BASE_URL", "http://localhost:8725"),
-        ("DATA_DIR", "./data"),
-        ("MAX_UPLOAD_MB", "50"),
-    ])
+const CONFIG_KEYS: [&str; 7] = [
+    "ADMIN_USERNAME",
+    "ADMIN_PASSWORD",
+    "SECRET_KEY",
+    "UPLOAD_TOKEN",
+    "APP_BASE_URL",
+    "DATA_DIR",
+    "MAX_UPLOAD_MB",
+];
+
+fn load_config_file(path: &FsPath) -> Result<HashMap<String, String>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("configuration error: could not read {}", path.display()))?;
+    parse_env_file(&content)
 }
 
-fn config_path() -> PathBuf {
-    if let Ok(path) = env::var("RECEIPT_UPLOAD_CONFIG") {
-        return PathBuf::from(path);
+fn parse_env_file(content: &str) -> Result<HashMap<String, String>> {
+    let mut values = HashMap::new();
+    for (index, raw_line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((raw_name, raw_value)) = line.split_once('=') else {
+            bail!("configuration error: line {line_number} must be KEY=VALUE");
+        };
+        let name = raw_name.trim();
+        if !CONFIG_KEYS.contains(&name) {
+            bail!("configuration error: {name} is not a supported configuration key");
+        }
+        if values.contains_key(name) {
+            bail!("configuration error: {name} is defined more than once");
+        }
+        values.insert(
+            name.to_string(),
+            parse_env_value(raw_value.trim(), line_number)?,
+        );
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("receipt-upload")
-        .join("config.json")
-}
-
-fn load_saved_config() -> Result<HashMap<String, String>> {
-    let path = config_path();
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let values: HashMap<String, String> = serde_json::from_str(&fs::read_to_string(path)?)?;
     Ok(values)
 }
 
-fn config_value(saved: &HashMap<String, String>, name: &str) -> String {
-    env::var(name)
-        .ok()
-        .or_else(|| saved.get(name).cloned())
-        .unwrap_or_else(|| default_env()[name].to_string())
+fn parse_env_value(value: &str, line_number: usize) -> Result<String> {
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        return unescape_double_quoted(&value[1..value.len() - 1], line_number);
+    }
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        return Ok(value[1..value.len() - 1].to_string());
+    }
+    if value.starts_with('"')
+        || value.starts_with('\'')
+        || value.ends_with('"')
+        || value.ends_with('\'')
+    {
+        bail!("configuration error: line {line_number} has an unterminated quoted value");
+    }
+    Ok(value.to_string())
 }
 
-fn save_config_value(name: &str, value: &str) -> Result<PathBuf> {
-    if !default_env().contains_key(name) {
-        bail!("Unsupported configuration key: {name}");
+fn unescape_double_quoted(value: &str, line_number: usize) -> Result<String> {
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        let Some(escaped) = chars.next() else {
+            bail!("configuration error: line {line_number} has an invalid escape sequence");
+        };
+        match escaped {
+            'n' => output.push('\n'),
+            'r' => output.push('\r'),
+            't' => output.push('\t'),
+            '\\' => output.push('\\'),
+            '"' => output.push('"'),
+            other => output.push(other),
+        }
     }
-    if value.is_empty() {
-        bail!("{name} cannot be empty.");
+    Ok(output)
+}
+
+fn required_config(values: &HashMap<String, String>, name: &str) -> Result<String> {
+    values
+        .get(name)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .with_context(|| format!("configuration error: {name} is required"))
+}
+
+fn validate_config_values(values: &HashMap<String, String>) -> Result<()> {
+    for key in CONFIG_KEYS {
+        let value = required_config(values, key)?;
+        if is_placeholder_config_value(&value) {
+            bail!("configuration error: {key} must be set to a real value");
+        }
     }
-    let mut values = load_saved_config()?;
-    values.insert(name.to_string(), value.to_string());
-    let path = config_path();
+    parse_positive_usize(values, "MAX_UPLOAD_MB")?;
+    let app_base_url = required_config(values, "APP_BASE_URL")?;
+    validate_app_base_url(&app_base_url)
+        .map_err(|message| anyhow::anyhow!("configuration error: APP_BASE_URL {message}"))?;
+    let upload_token = required_config(values, "UPLOAD_TOKEN")?;
+    validate_upload_token(&upload_token)
+        .map_err(|message| anyhow::anyhow!("configuration error: UPLOAD_TOKEN {message}"))?;
+    Ok(())
+}
+
+fn is_placeholder_config_value(value: &str) -> bool {
+    matches!(
+        value,
+        "REPLACE_ME" | "REPLACE_WITH_LONG_RANDOM_SECRET" | "REPLACE_WITH_SECRET_UPLOAD_TOKEN"
+    )
+}
+
+fn parse_positive_usize(values: &HashMap<String, String>, name: &str) -> Result<usize> {
+    let value = required_config(values, name)?;
+    let parsed = value
+        .parse::<usize>()
+        .with_context(|| format!("configuration error: {name} must be a positive integer"))?;
+    if parsed == 0 {
+        bail!("configuration error: {name} must be a positive integer");
+    }
+    Ok(parsed)
+}
+
+fn init_config_file(path: &FsPath, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        bail!(
+            "configuration error: {} already exists; use --force to overwrite it",
+            path.display()
+        );
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, serde_json::to_string_pretty(&values)? + "\n")?;
+    let content = format!(
+        "ADMIN_USERNAME=admin\nADMIN_PASSWORD=REPLACE_ME\nSECRET_KEY={}\nUPLOAD_TOKEN={}\nAPP_BASE_URL=http://localhost:8725\nDATA_DIR=./data\nMAX_UPLOAD_MB=50\n",
+        random_alphanumeric(48),
+        random_alphanumeric(32),
+    );
+    write_restricted(path, &content, force)?;
+    println!("initialized configuration at {}", path.display());
+    println!("edit ADMIN_PASSWORD before real use");
+    Ok(())
+}
+
+fn write_restricted(path: &FsPath, content: &str, force: bool) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(force);
+    if !force {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(content.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    Ok(path)
+    Ok(())
+}
+
+fn check_config_file(path: &FsPath) -> Result<()> {
+    let settings = Settings::load(path)?;
+    println!("configuration OK: {}", path.display());
+    println!("APP_BASE_URL={}", settings.app_base_url);
+    println!("DATA_DIR={}", settings.data_dir.display());
+    println!("MAX_UPLOAD_MB={}", settings.max_upload_bytes / 1024 / 1024);
+    Ok(())
+}
+
+fn save_config_value(path: &FsPath, name: &str, value: &str) -> Result<PathBuf> {
+    if !CONFIG_KEYS.contains(&name) {
+        bail!("configuration error: {name} is not a supported configuration key");
+    }
+    if value.trim().is_empty() {
+        bail!("configuration error: {name} is required");
+    }
+    let mut values = load_config_file(path)?;
+    values.insert(name.to_string(), value.to_string());
+    let content = render_config_file(&values)?;
+    write_restricted(path, &content, true)?;
+    Ok(path.to_path_buf())
+}
+
+fn render_config_file(values: &HashMap<String, String>) -> Result<String> {
+    let mut output = String::new();
+    for key in CONFIG_KEYS {
+        let value = values
+            .get(key)
+            .with_context(|| format!("configuration error: {key} is required"))?;
+        output.push_str(key);
+        output.push('=');
+        output.push_str(&quote_env_value(value));
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn quote_env_value(value: &str) -> String {
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/' | b':' | b'-' | b'_')
+    }) {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 fn print_generated(key: &str, length: usize, raw: bool) -> Result<()> {
     if length == 0 {
         bail!("Length must be greater than zero.");
     }
-    let value: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect();
+    let value = random_alphanumeric(length);
     if raw {
         println!("{value}");
     } else {
-        println!("export {key}='{value}'");
+        println!("{key}={value}");
     }
     Ok(())
+}
+
+fn random_alphanumeric(length: usize) -> String {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect()
 }
 
 fn prompt_password() -> Result<String> {
@@ -1464,8 +1668,8 @@ fn prompt_password() -> Result<String> {
     Ok(password)
 }
 
-fn list_banned_ips(show_all: bool) -> Result<()> {
-    let settings = Settings::load()?;
+fn list_banned_ips(config_path: &FsPath, show_all: bool) -> Result<()> {
+    let settings = Settings::load(config_path)?;
     init_db(&settings.db_path())?;
     with_conn(&settings.db_path(), |conn| {
         purge_old_login_attempts(conn)?;
@@ -1520,8 +1724,8 @@ fn ban_row(
     ))
 }
 
-fn unban_ip(id: i64) -> Result<()> {
-    let settings = Settings::load()?;
+fn unban_ip(config_path: &FsPath, id: i64) -> Result<()> {
+    let settings = Settings::load(config_path)?;
     init_db(&settings.db_path())?;
     with_conn(&settings.db_path(), |conn| {
         let ip: Option<String> = conn
@@ -1583,6 +1787,72 @@ mod tests {
         );
 
         fs::remove_dir_all(data_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn config_init_creates_parent_refuses_overwrite_and_can_force() -> Result<()> {
+        let dir = env::temp_dir().join(format!("receipt-upload-config-test-{}", Uuid::new_v4()));
+        let config_path = dir.join("runtime").join("app.env");
+
+        init_config_file(&config_path, false)?;
+        assert!(config_path.exists());
+        let first_content = fs::read_to_string(&config_path)?;
+        assert!(first_content.contains("ADMIN_PASSWORD=REPLACE_ME"));
+        assert!(first_content.contains("SECRET_KEY="));
+        assert!(first_content.contains("UPLOAD_TOKEN="));
+
+        assert!(init_config_file(&config_path, false).is_err());
+        init_config_file(&config_path, true)?;
+        let forced_content = fs::read_to_string(&config_path)?;
+        assert_ne!(first_content, forced_content);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn config_check_rejects_placeholders_until_manual_values_are_set() -> Result<()> {
+        let dir = env::temp_dir().join(format!("receipt-upload-config-test-{}", Uuid::new_v4()));
+        let config_path = dir.join("app.env");
+
+        init_config_file(&config_path, false)?;
+        assert!(check_config_file(&config_path).is_err());
+
+        save_config_value(&config_path, "ADMIN_PASSWORD", "dev-password")?;
+        check_config_file(&config_path)?;
+
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn example_config_documents_every_supported_setting_without_live_secrets() -> Result<()> {
+        let values = parse_env_file(include_str!("../app.env.example"))?;
+        for key in CONFIG_KEYS {
+            assert!(
+                values.contains_key(key),
+                "{key} is missing from app.env.example"
+            );
+        }
+        assert!(is_placeholder_config_value(
+            required_config(&values, "ADMIN_PASSWORD")?.as_str()
+        ));
+        assert!(is_placeholder_config_value(
+            required_config(&values, "SECRET_KEY")?.as_str()
+        ));
+        assert!(is_placeholder_config_value(
+            required_config(&values, "UPLOAD_TOKEN")?.as_str()
+        ));
         Ok(())
     }
 

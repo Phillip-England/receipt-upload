@@ -7,7 +7,7 @@ sync:
 	cargo fetch
 
 run:
-	cargo run -- serve --host 0.0.0.0 --port 8725
+	cargo run -- serve --config ./config/.env --host 0.0.0.0 --port 8725
 
 check:
 	cargo fmt --check

@@ -7,7 +7,7 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 ## Features
 
 - Axum-based Rust web app.
-- Single admin login configured by environment variables or saved CLI defaults.
+- Single admin login configured by an explicit environment-style config file.
 - Admin-managed secret cardholder upload URL: `/upload/{UPLOAD_TOKEN}`.
 - Cardholder and store management from the admin portal.
 - Multiple store checkboxes per receipt.
@@ -46,74 +46,92 @@ cargo install --locked --path . --force
 No separate PDF dependency setup is needed. Start the installed app with:
 
 ```bash
-receipt-upload
+receipt-upload --config ./runtime/app.env
 ```
 
 The default admin URL is `http://localhost:8725/admin/login`. To select another bind address or port:
 
 ```bash
-receipt-upload serve --host 0.0.0.0 --port 8725
+receipt-upload serve --config ./runtime/app.env --host 0.0.0.0 --port 8725
 ```
 
-`receipt-upload --host 0.0.0.0 --port 8725` also works as shorthand for `receipt-upload serve`.
+`receipt-upload --config ./runtime/app.env --host 0.0.0.0 --port 8725` also works as shorthand for `receipt-upload serve`.
 
 ## First-Time Setup
 
-Set persistent default admin credentials:
+Create an explicit runtime configuration file:
 
 ```bash
-receipt-upload set-username admin
-receipt-upload set-password
+receipt-upload config init --path ./runtime/app.env
 ```
 
-Other app settings can be persisted the same way:
+Edit `ADMIN_PASSWORD` before real use, then validate the file without starting the server:
 
 ```bash
-receipt-upload set-config APP_BASE_URL https://receipts.example.com
-receipt-upload set-config DATA_DIR /var/lib/receipt-upload
+receipt-upload config check --config ./runtime/app.env
 ```
 
-Runtime environment variables still take priority over saved defaults.
-
-Generate strong secret values:
+Start the app only after validation succeeds:
 
 ```bash
-receipt-upload generate-secret-key
-receipt-upload generate-upload-token
+receipt-upload serve --config ./runtime/app.env
+```
+
+The selected configuration source is always supplied with `--config`. If omitted, the conventional default path is `/config/app.env`.
+
+Existing config files can be edited with the CLI:
+
+```bash
+receipt-upload set-username --config ./runtime/app.env admin
+receipt-upload set-password --config ./runtime/app.env
+receipt-upload set-config --config ./runtime/app.env APP_BASE_URL https://receipts.example.com
+receipt-upload set-config --config ./runtime/app.env DATA_DIR /var/lib/receipt-upload
 ```
 
 ## CLI Reference
 
 ```bash
-receipt-upload
-receipt-upload serve
-receipt-upload serve --host 0.0.0.0 --port 8725
-receipt-upload set-username admin
-receipt-upload set-password
-receipt-upload set-password 'replace-this-password'
-receipt-upload set-config APP_BASE_URL https://receipts.example.com
-receipt-upload set-config DATA_DIR /var/lib/receipt-upload
+receipt-upload --config ./runtime/app.env
+receipt-upload serve --config ./runtime/app.env
+receipt-upload serve --config ./runtime/app.env --host 0.0.0.0 --port 8725
+receipt-upload config init --path ./runtime/app.env
+receipt-upload config init --path ./runtime/app.env --force
+receipt-upload config check --config ./runtime/app.env
+receipt-upload set-username --config ./runtime/app.env admin
+receipt-upload set-password --config ./runtime/app.env
+receipt-upload set-password --config ./runtime/app.env 'replace-this-password'
+receipt-upload set-config --config ./runtime/app.env APP_BASE_URL https://receipts.example.com
+receipt-upload set-config --config ./runtime/app.env DATA_DIR /var/lib/receipt-upload
 receipt-upload generate-secret-key
 receipt-upload generate-secret-key --raw
 receipt-upload generate-upload-token
 receipt-upload generate-upload-token --raw
-receipt-upload list-banned-ips
-receipt-upload list-banned-ips --all
-receipt-upload unban-ip 1
+receipt-upload list-banned-ips --config ./runtime/app.env
+receipt-upload list-banned-ips --config ./runtime/app.env --all
+receipt-upload unban-ip --config ./runtime/app.env 1
 ```
 
-## Environment Variables
+## Configuration File
 
-| Variable | Default | Description |
+`receipt-upload` reads one environment-style config file selected by `--config`. It does not search the working directory for `.env`, and it does not merge runtime environment variables into application settings.
+
+The committed `app.env.example` documents every supported setting without production secrets. `receipt-upload config init --path ./runtime/app.env` creates a local config file with restrictive permissions on supported operating systems. Generated runtime config files under `runtime/` and `config/` are ignored by Git.
+
+| Variable | Example | Description |
 | --- | --- | --- |
 | `ADMIN_USERNAME` | `admin` | Admin login username. |
-| `ADMIN_PASSWORD` | `password` | Admin login password. Change this before use. |
-| `SECRET_KEY` | `dev-secret-change-me` | Signs the admin session cookie. Use `generate-secret-key`. |
-| `UPLOAD_TOKEN` | `dev-upload-token` | Secret token used in `/upload/{UPLOAD_TOKEN}`. |
+| `ADMIN_PASSWORD` | `REPLACE_ME` | Admin login password. Change this before use. |
+| `SECRET_KEY` | generated by init | Signs the admin session cookie. |
+| `UPLOAD_TOKEN` | generated by init | Secret token used in `/upload/{UPLOAD_TOKEN}`. |
 | `APP_BASE_URL` | `http://localhost:8725` | Public URL shown in the admin portal for the upload link. |
 | `DATA_DIR` | `./data` | Directory for SQLite and uploaded receipt PDFs. |
 | `MAX_UPLOAD_MB` | `50` | Maximum total upload size per receipt submission. |
-| `RECEIPT_UPLOAD_CONFIG` | Platform config path | Persistent defaults file path. |
+
+Configuration errors identify the key without printing sensitive values, for example:
+
+```text
+configuration error: ADMIN_PASSWORD is required
+```
 
 ## Admin Usage
 
@@ -175,16 +193,12 @@ Run:
 
 ```bash
 docker run --rm -p 8725:8725 \
-  -e ADMIN_USERNAME=admin \
-  -e ADMIN_PASSWORD='replace-me' \
-  -e SECRET_KEY='replace-with-a-long-random-secret' \
-  -e UPLOAD_TOKEN='replace-with-a-secret-token' \
-  -e APP_BASE_URL='https://receipts.example.com' \
+  -v "$PWD/runtime/app.env:/config/app.env:ro" \
   -v receipt-upload-data:/app/data \
   receipt-upload
 ```
 
-Uploaded PDFs and SQLite data are stored under `/app/data`.
+Uploaded PDFs and SQLite data are stored under the configured `DATA_DIR`. For the Docker command above, set `DATA_DIR=/app/data` in `runtime/app.env`.
 
 ## Make Targets
 
