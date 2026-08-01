@@ -44,6 +44,10 @@ var embedded embed.FS
 
 const (
 	sessionCookie     = "receipt-upload-session"
+	defaultConfigPath = "./config/.env"
+	defaultDataDir    = "./data"
+	defaultDBPath     = "./data/main.sqlite"
+	defaultUploadDir  = "./data/receipts"
 	banHours          = 24
 	maxFailedLogins   = 3
 	maxImageDimension = 1600
@@ -57,7 +61,6 @@ var configKeys = []string{
 	"SECRET_KEY",
 	"UPLOAD_TOKEN",
 	"APP_BASE_URL",
-	"DATA_DIR",
 	"MAX_UPLOAD_MB",
 }
 
@@ -122,7 +125,7 @@ func main() {
 }
 
 func run(args []string) error {
-	config := "./config/.env"
+	config := defaultConfigPath
 	args = normalizeArgs(args)
 	args, config = consumeConfig(args, config)
 	if len(args) == 0 {
@@ -130,25 +133,18 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "init":
-		dataDir := "./data"
 		force := false
 		rest := args[1:]
 		rest, config = consumeConfig(rest, config)
 		for i := 0; i < len(rest); i++ {
 			switch rest[i] {
-			case "--data-dir":
-				i++
-				if i >= len(rest) {
-					return errors.New("--data-dir requires a path")
-				}
-				dataDir = rest[i]
 			case "--force":
 				force = true
 			default:
 				return fmt.Errorf("unknown argument: %s", rest[i])
 			}
 		}
-		return initApp(config, dataDir, force)
+		return initApp(config, force)
 	case "config":
 		if len(args) < 2 {
 			return errors.New("config requires init or check")
@@ -157,7 +153,7 @@ func run(args []string) error {
 		config = cfg
 		switch args[1] {
 		case "init":
-			path := "./config/.env"
+			path := defaultConfigPath
 			force := false
 			for i := 0; i < len(rest); i++ {
 				switch rest[i] {
@@ -181,16 +177,11 @@ func run(args []string) error {
 		if len(args) < 2 || args[1] != "init" {
 			return errors.New("database requires init")
 		}
-		dataDir := "./data"
 		rest, _ := consumeConfig(args[2:], config)
-		for i := 0; i < len(rest); i++ {
-			if rest[i] != "--data-dir" || i+1 >= len(rest) {
-				return errors.New("usage: receipt-upload database init [--data-dir PATH]")
-			}
-			i++
-			dataDir = rest[i]
+		if len(rest) != 0 {
+			return errors.New("usage: receipt-upload database init")
 		}
-		return initDataDir(dataDir)
+		return initDataDir()
 	case "serve":
 		host := "0.0.0.0"
 		port := "8725"
@@ -382,7 +373,7 @@ func serve(configPath, host, port string) error {
 }
 
 func (s Settings) dbPath() string {
-	return filepath.Join(s.DataDir, "app.sqlite3")
+	return defaultDBPath
 }
 
 func (s Settings) usesDefaultAdminCredentials() bool {
@@ -1071,7 +1062,7 @@ receipt-upload init
 receipt-upload config check
 receipt-upload serve</code></pre></div><div class="callout"><strong>Default address</strong><span>Documentation is available at <code>http://localhost:8725/</code>. Administration lives at <code>/admin/login</code>.</span></div></section>
 <section class="docs-section" id="workflow"><div class="section-intro"><p class="eyebrow">How it works</p><h2>One administrator, simple links for everyone else</h2></div><div class="step-grid"><article><span class="step-number">01</span><h3>Configure</h3><p>The admin creates cardholders and stores, then chooses the public hostname and secret upload code.</p></article><article><span class="step-number">02</span><h3>Share</h3><p>Send the generated private upload URL to cardholders. They do not create accounts or sign in.</p></article><article><span class="step-number">03</span><h3>Collect</h3><p>Cardholders select their name, add expense details, and attach one or more receipt photos.</p></article><article><span class="step-number">04</span><h3>Review</h3><p>The app resizes images, builds one PDF per expense, and makes it available in the admin portal.</p></article></div></section>
-<section class="docs-section"><div class="section-intro"><p class="eyebrow">Configuration</p><h2>Environment-style config file</h2><p>The application reads the file passed with <code>--config</code> (default: <code>./config/.env</code>). Runtime environment variables are not merged in.</p></div><div class="config-list"><div><code>ADMIN_USERNAME</code><span>Administrator login name</span></div><div><code>ADMIN_PASSWORD</code><span>Administrator password</span></div><div><code>SECRET_KEY</code><span>Signs admin session cookies</span></div><div><code>UPLOAD_TOKEN</code><span>Initial private upload-link token</span></div><div><code>APP_BASE_URL</code><span>Public origin used when building links</span></div><div><code>DATA_DIR</code><span>SQLite database and receipt PDFs</span></div><div><code>MAX_UPLOAD_MB</code><span>Maximum size of one submission</span></div></div></section>
+<section class="docs-section"><div class="section-intro"><p class="eyebrow">Configuration</p><h2>Environment-style config file</h2><p>The application reads the file passed with <code>--config</code> (default: <code>./config/.env</code>). Runtime environment variables are not merged in.</p></div><div class="config-list"><div><code>ADMIN_USERNAME</code><span>Administrator login name</span></div><div><code>ADMIN_PASSWORD</code><span>Administrator password</span></div><div><code>SECRET_KEY</code><span>Signs admin session cookies</span></div><div><code>UPLOAD_TOKEN</code><span>Initial private upload-link token</span></div><div><code>APP_BASE_URL</code><span>Public origin used when building links</span></div><div><code>MAX_UPLOAD_MB</code><span>Maximum size of one submission</span></div></div></section>
 <section class="docs-section"><div class="section-intro"><p class="eyebrow">Deployment</p><h2>Docker or a standalone binary</h2></div><div class="deploy-grid"><div><h3>Standalone</h3><pre><code>receipt-upload serve \
   --config ./runtime/app.env \
   --host 0.0.0.0 \
@@ -1079,8 +1070,8 @@ receipt-upload serve</code></pre></div><div class="callout"><strong>Default addr
 docker run --rm -p 8725:8725 \
   -v "$PWD/config/.env:/app/config/.env:ro" \
   -v receipt-upload-data:/app/data \
-  receipt-upload</code></pre></div></div><p class="docs-note">Persist <code>DATA_DIR</code>. It contains both <code>app.sqlite3</code> and generated receipt PDFs.</p></section>
-<section class="docs-section"><div class="section-intro"><p class="eyebrow">Operational notes</p><h2>Designed to stay small</h2></div><div class="feature-grid"><article><h3>Image processing included</h3><p>Phone photos are resized to a maximum 1600px dimension and JPEG-compressed before PDF generation. No external converter is required.</p></article><article><h3>Local, portable data</h3><p>Metadata lives in one SQLite database and receipt PDFs live beside it under the configured data directory.</p></article><article><h3>Protected administration</h3><p>Three failed login attempts ban an IP for 24 hours. The CLI can list and remove ban records.</p></article></div></section></main>`
+  receipt-upload</code></pre></div></div><p class="docs-note">Persist <code>./data</code>. It contains <code>main.sqlite</code> and generated receipt PDFs.</p></section>
+<section class="docs-section"><div class="section-intro"><p class="eyebrow">Operational notes</p><h2>Designed to stay small</h2></div><div class="feature-grid"><article><h3>Image processing included</h3><p>Phone photos are resized to a maximum 1600px dimension and JPEG-compressed before PDF generation. No external converter is required.</p></article><article><h3>Local, portable data</h3><p>Metadata lives in one SQLite database at <code>./data/main.sqlite</code> and receipt PDFs live beside it under <code>./data/receipts</code>.</p></article><article><h3>Protected administration</h3><p>Three failed login attempts ban an IP for 24 hours. The CLI can list and remove ban records.</p></article></div></section></main>`
 	return layout("receipt-upload — Developer documentation", body)
 }
 
@@ -1327,15 +1318,14 @@ func loadSettings(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	maxMB, _ := strconv.ParseInt(values["MAX_UPLOAD_MB"], 10, 64)
-	dataDir := filepath.Clean(values["DATA_DIR"])
 	return Settings{
 		AdminUsername:  values["ADMIN_USERNAME"],
 		AdminPassword:  values["ADMIN_PASSWORD"],
 		SecretKey:      values["SECRET_KEY"],
 		UploadToken:    values["UPLOAD_TOKEN"],
 		AppBaseURL:     values["APP_BASE_URL"],
-		DataDir:        dataDir,
-		UploadDir:      filepath.Join(dataDir, "receipts"),
+		DataDir:        defaultDataDir,
+		UploadDir:      defaultUploadDir,
 		MaxUploadBytes: maxMB * 1024 * 1024,
 	}, nil
 }
@@ -1443,36 +1433,30 @@ func validateAppBaseURL(value string) error {
 	return nil
 }
 
-func initApp(configPath, dataDir string, force bool) error {
-	if err := initConfigFileWithDataDir(configPath, dataDir, force); err != nil {
+func initApp(configPath string, force bool) error {
+	if err := initConfigFile(configPath, force); err != nil {
 		return err
 	}
-	if err := initDataDir(dataDir); err != nil {
+	if err := initDataDir(); err != nil {
 		return err
 	}
 	fmt.Println("initialization complete")
 	return nil
 }
 
-func initDataDir(dataDir string) error {
-	uploadDir := filepath.Join(dataDir, "receipts")
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		return fmt.Errorf("could not create data directory %s", dataDir)
+func initDataDir() error {
+	if err := os.MkdirAll(defaultUploadDir, 0755); err != nil {
+		return fmt.Errorf("could not create data directory %s", defaultDataDir)
 	}
-	dbPath := filepath.Join(dataDir, "app.sqlite3")
-	if err := initDB(dbPath); err != nil {
+	if err := initDB(defaultDBPath); err != nil {
 		return err
 	}
-	fmt.Printf("initialized database at %s\n", dbPath)
-	fmt.Printf("initialized receipt storage at %s\n", uploadDir)
+	fmt.Printf("initialized database at %s\n", defaultDBPath)
+	fmt.Printf("initialized receipt storage at %s\n", defaultUploadDir)
 	return nil
 }
 
 func initConfigFile(path string, force bool) error {
-	return initConfigFileWithDataDir(path, "./data", force)
-}
-
-func initConfigFileWithDataDir(path, dataDir string, force bool) error {
 	if _, err := os.Stat(path); err == nil && !force {
 		return fmt.Errorf("configuration error: %s already exists; use --force to overwrite it", path)
 	}
@@ -1481,7 +1465,7 @@ func initConfigFileWithDataDir(path, dataDir string, force bool) error {
 	}
 	secret, _ := randomAlphanumeric(48)
 	token, _ := randomAlphanumeric(32)
-	content := fmt.Sprintf("ADMIN_USERNAME=admin\nADMIN_PASSWORD=REPLACE_ME\nSECRET_KEY=%s\nUPLOAD_TOKEN=%s\nAPP_BASE_URL=http://localhost:8725\nDATA_DIR=%s\nMAX_UPLOAD_MB=50\n", secret, token, quoteEnvValue(dataDir))
+	content := fmt.Sprintf("ADMIN_USERNAME=admin\nADMIN_PASSWORD=REPLACE_ME\nSECRET_KEY=%s\nUPLOAD_TOKEN=%s\nAPP_BASE_URL=http://localhost:8725\nMAX_UPLOAD_MB=50\n", secret, token)
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		return err
 	}
@@ -1498,7 +1482,6 @@ func checkConfigFile(path string) error {
 	}
 	fmt.Printf("configuration OK: %s\n", path)
 	fmt.Printf("APP_BASE_URL=%s\n", settings.AppBaseURL)
-	fmt.Printf("DATA_DIR=%s\n", settings.DataDir)
 	fmt.Printf("MAX_UPLOAD_MB=%d\n", settings.MaxUploadBytes/1024/1024)
 	return nil
 }
