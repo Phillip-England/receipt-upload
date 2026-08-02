@@ -1,0 +1,40 @@
+{
+  "variables": [
+    {
+      "name": "ADMIN_USERNAME",
+      "description": "Username for the single administrator account used to log in to the admin portal.",
+      "example": "admin",
+      "required": true
+    },
+    {
+      "name": "ADMIN_PASSWORD",
+      "description": "Password for the administrator account. Choose a strong unique password before using the app.",
+      "example": "replace-with-a-strong-password",
+      "required": true
+    },
+    {
+      "name": "SECRET_KEY",
+      "description": "Long random secret used to sign the admin session cookie. Generate one with `receipt-upload generate-secret-key --raw`.",
+      "example": "64-character-random-secret",
+      "required": true
+    },
+    {
+      "name": "UPLOAD_TOKEN",
+      "description": "Secret token used in the private cardholder upload URL at `/upload/{UPLOAD_TOKEN}`. Generate one with `receipt-upload generate-upload-token --raw`.",
+      "example": "receipt-upload-secret-token",
+      "required": true
+    },
+    {
+      "name": "APP_BASE_URL",
+      "description": "Public base URL for the app, used when showing the upload link in the admin portal.",
+      "example": "https://receipts.example.com",
+      "required": true
+    },
+    {
+      "name": "MAX_UPLOAD_MB",
+      "description": "Maximum total upload size in megabytes for one receipt submission.",
+      "example": "50",
+      "required": true
+    }
+  ]
+}
