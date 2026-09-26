@@ -30,6 +30,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata"
+	"unicode"
 
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
@@ -95,13 +97,14 @@ type UploadRow struct {
 	Notes            string
 	StoreNames       string
 	PDFSize          string
-	ArchivedAt       sql.NullString
+	DeletedAt        sql.NullString
 	CreatedAt        string
 }
 
 type AdminView struct {
 	Cardholders []NamedRow
 	Stores      []NamedRow
+	Categories  []NamedRow
 	Uploads     []UploadRow
 	DiskUsage   string
 }
@@ -360,6 +363,8 @@ func serve(configPath, host, port string) error {
 	mux.HandleFunc("/admin/stores", app.addStore)
 	mux.HandleFunc("/admin/stores/", app.storeAction)
 	mux.HandleFunc("/admin/uploads/", app.uploadAction)
+	mux.HandleFunc("/admin/categories", app.categoryAction)
+	mux.HandleFunc("/admin/categories/", app.categoryAction)
 	mux.HandleFunc("/upload/", app.upload)
 	addr := net.JoinHostPort(host, port)
 	server := &http.Server{
@@ -579,21 +584,32 @@ func (a *App) uploadAction(w http.ResponseWriter, r *http.Request) {
 		a.downloadUpload(w, r)
 		return
 	}
-	if strings.HasSuffix(path, "/archive") && r.Method == http.MethodPost {
-		id, ok := idFromPath(path, "/admin/uploads/", "/archive")
-		if ok {
-			_ = execSQL(a.settings.dbPath(), "UPDATE uploads SET archived_at = ? WHERE id = ?", nowISO(), id)
+	if r.Method == http.MethodPost {
+		for _, action := range []string{"delete", "restore", "purge"} {
+			id, ok := idFromPath(path, "/admin/uploads/", "/"+action)
+			if !ok {
+				continue
+			}
+			var err error
+			switch action {
+			case "delete":
+				err = execSQL(a.settings.dbPath(), "UPDATE uploads SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", nowISO(), id)
+			case "restore":
+				err = execSQL(a.settings.dbPath(), "UPDATE uploads SET deleted_at = NULL WHERE id = ?", id)
+			case "purge":
+				err = a.deleteUpload(id)
+			}
+			if err != nil {
+				serverError(w, err)
+				return
+			}
+			target := "/admin"
+			if action != "delete" {
+				target += "#graveyard"
+			}
+			http.Redirect(w, r, target, http.StatusSeeOther)
+			return
 		}
-		http.Redirect(w, r, "/admin", http.StatusSeeOther)
-		return
-	}
-	if strings.HasSuffix(path, "/delete") && r.Method == http.MethodPost {
-		id, ok := idFromPath(path, "/admin/uploads/", "/delete")
-		if ok {
-			a.deleteUpload(id)
-		}
-		http.Redirect(w, r, "/admin", http.StatusSeeOther)
-		return
 	}
 	http.NotFound(w, r)
 }
@@ -610,9 +626,47 @@ func (a *App) downloadUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
-	var cardholder, pdfPath string
-	if err := db.QueryRow("SELECT cardholder_name, pdf_path FROM uploads WHERE id = ?", id).Scan(&cardholder, &pdfPath); err != nil {
+	var pdfPath string
+	var receipt UploadRow
+	if err := db.QueryRow("SELECT pdf_path, created_at, purchase_location, total, COALESCE(description, '') FROM uploads WHERE id = ?", id).Scan(&pdfPath, &receipt.CreatedAt, &receipt.PurchaseLocation, &receipt.Total, &receipt.Description); err != nil {
 		http.NotFound(w, r)
+		return
+	}
+	category := ""
+	if categoryID := r.URL.Query().Get("category_id"); categoryID != "" {
+		if err := db.QueryRow("SELECT name FROM expense_categories WHERE id = ?", categoryID).Scan(&category); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "Choose an existing expense category.", http.StatusBadRequest)
+			} else {
+				serverError(w, err)
+			}
+			return
+		}
+	}
+	rows, err := db.Query("SELECT store_name FROM receipt_stores WHERE upload_id = ? ORDER BY store_name", id)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	var locations []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			serverError(w, err)
+			return
+		}
+		locations = append(locations, name)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	filename, err := receiptFilename(receipt, locations, category)
+	if err != nil {
+		serverError(w, err)
 		return
 	}
 	file, err := os.Open(pdfPath)
@@ -621,23 +675,109 @@ func (a *App) downloadUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	filename := fmt.Sprintf("receipt-%d-%s.pdf", id, strings.NewReplacer("/", "-", "\\", "-", "\"", "").Replace(cardholder))
+
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	io.Copy(w, file)
 }
 
-func (a *App) deleteUpload(id int64) {
+// filenamePart keeps user-entered text safe in a downloadable filename.
+func filenamePart(value string) string {
+	var b strings.Builder
+	separator := false
+	for _, c := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(c) || unicode.IsDigit(c) {
+			if separator && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(c)
+			separator = false
+		} else if c != '\'' && c != '’' {
+			separator = true
+		}
+	}
+	if b.Len() == 0 {
+		return "blank"
+	}
+	return b.String()
+}
+
+func receiptFilename(u UploadRow, locations []string, category string) (string, error) {
+	date, err := time.Parse(time.RFC3339, u.CreatedAt)
+	if err == nil {
+		zone, zoneErr := time.LoadLocation("America/Chicago")
+		if zoneErr != nil {
+			return "", zoneErr
+		}
+		date = date.In(zone)
+	} else {
+		date, err = time.Parse("2006-01-02 15:04:05", u.CreatedAt)
+		if err != nil {
+			return "", err
+		}
+	}
+	price, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimPrefix(strings.TrimSpace(u.Total), "$"), ",", ""), 64)
+	if err != nil || math.IsNaN(price) || math.IsInf(price, 0) || price < 0 {
+		return "", errors.New("receipt total must be a non-negative amount")
+	}
+	location := "blank"
+	if len(locations) == 1 {
+		location = filenamePart(locations[0])
+	}
+	if len(locations) > 1 {
+		location = "split"
+	}
+	return fmt.Sprintf("%s-%s-%.2f-%s-%s-%s.pdf", date.Format("010206"), filenamePart(u.PurchaseLocation), price, filenamePart(u.Description), filenamePart(category), location), nil
+}
+
+func (a *App) deleteUpload(id int64) error {
 	db, err := openDB(a.settings.dbPath())
 	if err != nil {
-		return
+		return err
 	}
 	defer db.Close()
 	var pdfPath string
-	if err := db.QueryRow("SELECT pdf_path FROM uploads WHERE id = ?", id).Scan(&pdfPath); err == nil {
-		_ = os.Remove(pdfPath)
-		_, _ = db.Exec("DELETE FROM uploads WHERE id = ?", id)
+	if err := db.QueryRow("SELECT pdf_path FROM uploads WHERE id = ? AND deleted_at IS NOT NULL", id).Scan(&pdfPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
+	if err := os.Remove(pdfPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, err = db.Exec("DELETE FROM uploads WHERE id = ? AND deleted_at IS NOT NULL", id)
+	return err
+}
+
+func (a *App) categoryAction(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var err error
+	if r.URL.Path == "/admin/categories" {
+		name := strings.TrimSpace(r.FormValue("name"))
+		if name == "" {
+			a.renderAdminError(w, "Enter an expense category name.")
+			return
+		}
+		err = execSQL(a.settings.dbPath(), "INSERT OR IGNORE INTO expense_categories (name) VALUES (?)", name)
+	} else if id, ok := idFromPath(r.URL.Path, "/admin/categories/", "/delete"); ok {
+		err = execSQL(a.settings.dbPath(), "DELETE FROM expense_categories WHERE id = ?", id)
+	} else {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/admin#categories", http.StatusSeeOther)
 }
 
 func (a *App) upload(w http.ResponseWriter, r *http.Request) {
@@ -906,6 +1046,7 @@ func initDB(dbPath string) error {
 	schema := `
 PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS cardholders (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS expense_categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS stores (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS uploads (id INTEGER PRIMARY KEY AUTOINCREMENT, cardholder_id INTEGER, cardholder_name TEXT NOT NULL, total TEXT NOT NULL, purchase_location TEXT NOT NULL, description TEXT, notes TEXT, store_names TEXT, original_filenames TEXT NOT NULL, pdf_path TEXT NOT NULL, pdf_size_bytes INTEGER NOT NULL, archived_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(cardholder_id) REFERENCES cardholders(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS receipt_stores (upload_id INTEGER NOT NULL, store_id INTEGER, store_name TEXT NOT NULL, PRIMARY KEY(upload_id, store_name), FOREIGN KEY(upload_id) REFERENCES uploads(id) ON DELETE CASCADE, FOREIGN KEY(store_id) REFERENCES stores(id) ON DELETE SET NULL);
@@ -914,7 +1055,7 @@ CREATE TABLE IF NOT EXISTS app_settings (name TEXT PRIMARY KEY, value TEXT NOT N
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
-	for _, col := range []struct{ name, typ string }{{"description", "TEXT"}, {"notes", "TEXT"}, {"store_names", "TEXT"}} {
+	for _, col := range []struct{ name, typ string }{{"description", "TEXT"}, {"notes", "TEXT"}, {"store_names", "TEXT"}, {"deleted_at", "TEXT"}} {
 		if err := addColumnIfMissing(db, "uploads", col.name, col.typ); err != nil {
 			return err
 		}
@@ -989,11 +1130,15 @@ func loadAdminView(settings Settings) (AdminView, error) {
 	if err != nil {
 		return AdminView{}, err
 	}
+	categories, err := namedRows(db, "SELECT id, name FROM expense_categories ORDER BY name COLLATE NOCASE")
+	if err != nil {
+		return AdminView{}, err
+	}
 	uploads, err := uploadRows(db)
 	if err != nil {
 		return AdminView{}, err
 	}
-	return AdminView{Cardholders: cardholders, Stores: stores, Uploads: uploads, DiskUsage: humanBytes(directorySize(settings.DataDir))}, nil
+	return AdminView{Cardholders: cardholders, Stores: stores, Categories: categories, Uploads: uploads, DiskUsage: humanBytes(directorySize(settings.DataDir))}, nil
 }
 
 func loadUploadOptions(settings Settings) (UploadOptions, error) {
@@ -1031,7 +1176,7 @@ func namedRows(db *sql.DB, query string) ([]NamedRow, error) {
 }
 
 func uploadRows(db *sql.DB) ([]UploadRow, error) {
-	rows, err := db.Query("SELECT id, cardholder_name, total, purchase_location, COALESCE(description, ''), COALESCE(notes, ''), COALESCE(store_names, ''), pdf_size_bytes, archived_at, created_at FROM uploads ORDER BY archived_at IS NOT NULL, created_at DESC")
+	rows, err := db.Query("SELECT id, cardholder_name, total, purchase_location, COALESCE(description, ''), COALESCE(notes, ''), COALESCE(store_names, ''), pdf_size_bytes, deleted_at, created_at FROM uploads ORDER BY deleted_at IS NOT NULL, created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -1040,7 +1185,7 @@ func uploadRows(db *sql.DB) ([]UploadRow, error) {
 	for rows.Next() {
 		var row UploadRow
 		var size int64
-		if err := rows.Scan(&row.ID, &row.CardholderName, &row.Total, &row.PurchaseLocation, &row.Description, &row.Notes, &row.StoreNames, &size, &row.ArchivedAt, &row.CreatedAt); err != nil {
+		if err := rows.Scan(&row.ID, &row.CardholderName, &row.Total, &row.PurchaseLocation, &row.Description, &row.Notes, &row.StoreNames, &size, &row.DeletedAt, &row.CreatedAt); err != nil {
 			return nil, err
 		}
 		row.PDFSize = humanBytes(uint64(size))
@@ -1092,31 +1237,45 @@ func renderAdmin(settings Settings, uploadToken, appBaseURL string, view AdminVi
 		}
 		stores = b.String()
 	}
-	uploads := `<tr><td colspan="9" class="empty">No receipts uploaded yet.</td></tr>`
-	if len(view.Uploads) > 0 {
-		var b strings.Builder
-		for _, u := range view.Uploads {
-			muted := ""
-			status := "Active"
-			archive := fmt.Sprintf(`<form method="post" action="/admin/uploads/%d/archive"><button class="secondary" type="submit">Archive</button></form>`, u.ID)
-			if u.ArchivedAt.Valid {
-				muted = "muted"
-				status = "Archived"
-				archive = ""
-			}
-			stores := "Unassigned"
-			if u.StoreNames != "" {
-				stores = esc(u.StoreNames)
-			}
-			desc := u.Description
-			if desc == "" {
-				desc = u.Notes
-			}
-			fmt.Fprintf(&b, `<tr class="%s"><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="actions"><a class="button secondary" href="/admin/uploads/%d/download" data-download-link data-loading-text="Preparing PDF...">Download</a>%s<form method="post" action="/admin/uploads/%d/delete"><button class="danger secondary" type="submit">Delete</button></form></td></tr>`, muted, esc(u.CreatedAt), esc(u.CardholderName), esc(u.Total), esc(u.PurchaseLocation), stores, esc(desc), esc(u.PDFSize), status, u.ID, archive, u.ID)
-		}
-		uploads = b.String()
+	var categories strings.Builder
+	for _, c := range view.Categories {
+		fmt.Fprintf(&categories, `<li><span>%s</span><form method="post" action="/admin/categories/%d/delete"><button class="danger secondary" type="submit">Remove</button></form></li>`, esc(c.Name), c.ID)
 	}
-	return layout("Admin", fmt.Sprintf(`<header class="topbar"><div><h1>receipt-upload</h1><p>%s used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">%s</section><section class="panel wide"><h2>Secret Upload Link</h2>%s<div class="copy-row"><input readonly value="%s" aria-label="Current secret upload link"><a class="button" href="%s" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Public hostname / base URL <input name="app_base_url" type="url" value="%s" placeholder="https://receipts.example.com" autocomplete="url" required></label><label>Secret code <input name="secret_code" value="%s" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">The public URL is saved for future links. Changing the secret code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel"><h2>Stores</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Store" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel wide"><h2>Uploads</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Stores</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section></main>`, view.DiskUsage, defaultWarning(settings), message("alert", uploadLinkError), esc(uploadURL(appBaseURL, uploadToken)), esc(uploadURL(appBaseURL, uploadToken)), esc(appBaseURL), esc(uploadToken), cardholders, stores, uploads))
+	if len(view.Categories) == 0 {
+		categories.WriteString(`<li class="empty">No expense categories yet.</li>`)
+	}
+	uploads := renderReceiptRows(view, false)
+	graveyard := renderReceiptRows(view, true)
+	return layout("Admin", fmt.Sprintf(`<header class="topbar"><div><h1>receipt-upload</h1><p>%s used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">%s</section><section class="panel wide"><h2>Secret Upload Link</h2>%s<div class="copy-row"><input readonly value="%s" aria-label="Current secret upload link"><a class="button" href="%s" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Public hostname / base URL <input name="app_base_url" type="url" value="%s" placeholder="https://receipts.example.com" autocomplete="url" required></label><label>Secret code <input name="secret_code" value="%s" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">The public URL is saved for future links. Changing the secret code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel"><h2>Locations</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Location" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel" id="categories"><h2>Expense categories</h2><form class="inline-form" method="post" action="/admin/categories"><input name="name" placeholder="Category name" aria-label="Expense category name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel wide"><h2>Receipts</h2><p>Choose an expense category when downloading. No category uses literal “blank” in the filename. <a href="#graveyard">Open receipt graveyard</a></p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Locations</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section><section class="panel wide" id="graveyard"><h2>Receipt graveyard</h2><p>Deleted receipts stay here until you restore or permanently delete them.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Locations</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section></main>`, view.DiskUsage, defaultWarning(settings), message("alert", uploadLinkError), esc(uploadURL(appBaseURL, uploadToken)), esc(uploadURL(appBaseURL, uploadToken)), esc(appBaseURL), esc(uploadToken), cardholders, stores, categories.String(), uploads, graveyard))
+}
+
+func renderReceiptRows(view AdminView, deleted bool) string {
+	var b strings.Builder
+	var options strings.Builder
+	options.WriteString(`<option value="">No category (blank)</option>`)
+	for _, c := range view.Categories {
+		fmt.Fprintf(&options, `<option value="%d">%s</option>`, c.ID, esc(c.Name))
+	}
+	for _, u := range view.Uploads {
+		if u.DeletedAt.Valid != deleted {
+			continue
+		}
+		status := "Active"
+		actions := fmt.Sprintf(`<form method="post" action="/admin/uploads/%d/delete"><button class="danger secondary" type="submit">Delete</button></form>`, u.ID)
+		if deleted {
+			status = "Deleted"
+			actions = fmt.Sprintf(`<form method="post" action="/admin/uploads/%d/restore"><button class="secondary" type="submit">Restore</button></form><form method="post" action="/admin/uploads/%d/purge" onsubmit="return confirm('Permanently delete this receipt and its PDF? This cannot be undone.')"><button class="danger secondary" type="submit">Permanently delete</button></form>`, u.ID, u.ID)
+		}
+		stores := u.StoreNames
+		if stores == "" {
+			stores = "Unassigned"
+		}
+		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="actions"><form method="get" action="/admin/uploads/%d/download" class="receipt-download"><label>Expense category<select name="category_id">%s</select></label><button class="secondary" type="submit">Download</button></form>%s</td></tr>`, esc(u.CreatedAt), esc(u.CardholderName), esc(u.Total), esc(u.PurchaseLocation), esc(stores), esc(u.Description), esc(u.PDFSize), status, u.ID, options.String(), actions)
+	}
+	if b.Len() == 0 {
+		return `<tr><td colspan="9" class="empty">No receipts here.</td></tr>`
+	}
+	return b.String()
 }
 
 func renderUpload(token string, view UploadOptions, errMsg, success string) string {
@@ -1132,7 +1291,7 @@ func renderUpload(token string, view UploadOptions, errMsg, success string) stri
 		}
 		stores = b.String()
 	}
-	return layout("Upload Receipt", fmt.Sprintf(`<main class="upload-shell"><section class="upload-panel"><h1>Upload Receipt</h1>%s%s<form method="post" action="/upload/%s" enctype="multipart/form-data" class="stack" data-loading-form data-resize-upload><label>Cardholder<select name="cardholder_id" required><option value="">Select a name</option>%s</select></label><label>Total <input name="total" inputmode="decimal" placeholder="42.50" required></label><label>Place of Purchase <input name="purchase_location" placeholder="Vendor or location" required></label><label>Description <input name="description" placeholder="Business purpose or expense label"></label><fieldset><legend>Stores</legend><div class="check-list">%s</div></fieldset><label>Notes <textarea name="notes" rows="4"></textarea></label><label>Receipt Images<input name="files" type="file" multiple accept="image/*" required data-append-files data-file-list="receipt-file-list"></label><div class="file-selection" aria-live="polite"><div class="file-selection-header"><span id="receipt-file-count">No files selected</span><button class="secondary" type="button" data-clear-files>Clear</button></div><ul id="receipt-file-list" class="selected-files"></ul></div><button type="submit" data-loading-text="Uploading...">Upload</button><div class="loading-status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Uploading receipt.</span></div></form></section></main>`, message("success", success), message("alert", errMsg), esc(token), cardholders.String(), stores))
+	return layout("Upload Receipt", fmt.Sprintf(`<main class="upload-shell"><section class="upload-panel"><h1>Upload Receipt</h1>%s%s<form method="post" action="/upload/%s" enctype="multipart/form-data" class="stack" data-loading-form data-resize-upload><label>Cardholder<select name="cardholder_id" required><option value="">Select a name</option>%s</select></label><label>Total <input name="total" inputmode="decimal" placeholder="42.50" required></label><label>Place of Purchase <input name="purchase_location" placeholder="Vendor or location" required></label><label>Description <input name="description" placeholder="Business purpose or expense label"></label><fieldset><legend>Locations</legend><div class="check-list">%s</div></fieldset><label>Notes <textarea name="notes" rows="4"></textarea></label><label>Receipt Images<input name="files" type="file" multiple accept="image/*" required data-append-files data-file-list="receipt-file-list"></label><div class="file-selection" aria-live="polite"><div class="file-selection-header"><span id="receipt-file-count">No files selected</span><button class="secondary" type="button" data-clear-files>Clear</button></div><ul id="receipt-file-list" class="selected-files"></ul></div><button type="submit" data-loading-text="Uploading...">Upload</button><div class="loading-status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Uploading receipt.</span></div></form></section></main>`, message("success", success), message("alert", errMsg), esc(token), cardholders.String(), stores))
 }
 
 func layout(title, body string) string {

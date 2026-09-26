@@ -368,3 +368,6 @@ pre { overflow-x: auto; margin: 0; padding: 1.25rem; color: #d4d4d4; font-size: 
   .step-number { margin-bottom: 2rem; }
   .config-list > div, .callout { grid-template-columns: 1fr; }
 }
+
+.receipt-download { min-width: 190px; display: grid; gap: 0.5rem; }
+.receipt-download label { display: grid; gap: 0.35rem; font-size: 0.85rem; }

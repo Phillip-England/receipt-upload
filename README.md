@@ -16,7 +16,7 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 - Server-side image resizing and JPEG compression before PDF generation.
 - Uploaded PDFs stored on disk.
 - Receipt metadata stored in SQLite.
-- Admin receipt list with download, archive, and delete actions.
+- Admin receipt list with categorized downloads and a receipt graveyard for restore or permanent deletion.
 - App disk usage shown on the admin dashboard.
 - Failed admin login protection with IP bans.
 - CLI commands to list and remove banned IPs.
@@ -148,7 +148,8 @@ configuration error: ADMIN_PASSWORD is required
 5. Set the public hostname and secret code, then copy the resulting upload link from the admin dashboard.
 6. Send that link to cardholders.
 7. Review uploads from the admin dashboard.
-8. Download, archive, or delete uploaded receipts as needed.
+8. Create expense categories alongside locations, then optionally select a category when downloading.
+9. Delete receipts to move them to the receipt graveyard. Restore them or permanently delete them from there.
 
 The admin dashboard shows how much disk space the app is using under `./data`.
 Changing the secret code disables the previous upload link immediately. The admin-selected public URL and code are stored in the application database and take priority over `APP_BASE_URL` and `UPLOAD_TOKEN` on later starts.
@@ -178,7 +179,7 @@ data/
     <generated-id>.pdf
 ```
 
-SQLite stores receipt metadata, selected stores, timestamps, archive status, and PDF paths.
+SQLite stores receipt metadata, selected stores, timestamps, deletion status, and PDF paths.
 
 ## Login Ban System
 
@@ -215,3 +216,21 @@ make run
 make check
 make clean
 ```
+
+
+### Receipt export names and graveyard
+
+Downloads use `MMDDYY-vendor-price-description-category-location.pdf`, for example
+`092626-sams-19.08-milk-blank-split.pdf`. The date is the upload date in
+America/Chicago, and the price has two decimal places. Names are lowercase with
+spaces and punctuation converted to hyphens (apostrophes are removed).
+A single selected location uses its name; two or more use `split`.
+Missing descriptions, categories, or locations use literal `blank`.
+
+Expense categories can be added and removed in administration. The category
+selection applies to that download and is optional.
+
+Delete moves a receipt to the graveyard without removing its PDF. Permanent
+deletion is available only for receipts in the graveyard and asks for confirmation.
+Existing archived receipts appear in the active list after upgrading; their PDFs
+are preserved. Database changes are applied automatically at server startup.
