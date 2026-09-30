@@ -12,7 +12,8 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 - Cardholder and store management from the admin portal.
 - Multiple store checkboxes per receipt.
 - Multiple receipt images per upload, resized and merged into one PDF.
-- Client-side image shrinking before upload when the browser supports it.
+- Client-side image shrinking starts when photos are selected, so preparation can finish before Upload is pressed; unsupported images fall back to server processing.
+- Already-prepared RGB JPEGs up to 1600 pixels and 512 KB are embedded in PDFs without a second compression pass.
 - Server-side image resizing and JPEG compression before PDF generation.
 - Uploaded PDFs stored on disk.
 - Receipt metadata stored in SQLite.

@@ -921,20 +921,29 @@ func firstText(text map[string][]string, key string) string {
 }
 
 func preparePDFImage(data []byte) (PdfImage, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
+	img, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return PdfImage{}, err
 	}
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
+	// Browser-prepared RGB JPEGs can be embedded directly, avoiding another
+	// resize/encode pass and preserving receipt text through one compression.
+	if format == "jpeg" && max(width, height) <= maxImageDimension && len(data) <= 512*1024 {
+		if _, ok := img.(*image.YCbCr); ok {
+			return PdfImage{Width: width, Height: height, JPEG: data}, nil
+		}
+	}
 	scale := math.Min(1, float64(maxImageDimension)/float64(max(width, height)))
 	newW := max(1, int(math.Round(float64(width)*scale)))
 	newH := max(1, int(math.Round(float64(height)*scale)))
-	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
-	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
-	rgb := image.NewRGBA(dst.Bounds())
+	rgb := image.NewRGBA(image.Rect(0, 0, newW, newH))
 	draw.Draw(rgb, rgb.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
-	draw.Draw(rgb, rgb.Bounds(), dst, image.Point{}, draw.Over)
+	if width == newW && height == newH {
+		draw.Draw(rgb, rgb.Bounds(), img, bounds.Min, draw.Over)
+	} else {
+		xdraw.CatmullRom.Scale(rgb, rgb.Bounds(), img, bounds, draw.Over, nil)
+	}
 	var out bytes.Buffer
 	if err := jpeg.Encode(&out, rgb, &jpeg.Options{Quality: jpegQuality}); err != nil {
 		return PdfImage{}, err
@@ -1308,9 +1317,63 @@ func layout(title, body string) string {
 
 const clientJS = `
 document.querySelectorAll("[data-loading-form]").forEach((form)=>{form.addEventListener("submit",()=>{form.classList.add("is-loading");form.setAttribute("aria-busy","true");form.querySelectorAll("button[type='submit']").forEach((button)=>{button.dataset.originalText=button.textContent;button.textContent=button.dataset.loadingText||"Working...";button.disabled=true;});});});
-document.querySelectorAll("[data-append-files]").forEach((input)=>{const form=input.closest("form");const fileList=document.getElementById(input.dataset.fileList);const fileCount=document.getElementById("receipt-file-count");const clearButton=form?form.querySelector("[data-clear-files]"):null;let selectedFiles=window.DataTransfer?new DataTransfer():null;const renderFiles=()=>{const files=selectedFiles?selectedFiles.files:input.files;if(fileCount){const count=files.length;fileCount.textContent=count===0?"No files selected":count===1?"1 file selected":count+" files selected";}if(!fileList)return;fileList.innerHTML="";Array.from(files).forEach((file)=>{const item=document.createElement("li");item.textContent=file.name+" ("+Math.max(1,Math.round(file.size/1024))+" KB)";fileList.appendChild(item);});};input.addEventListener("change",()=>{if(selectedFiles){Array.from(input.files).forEach((file)=>selectedFiles.items.add(file));input.files=selectedFiles.files;}renderFiles();});if(clearButton){clearButton.addEventListener("click",()=>{if(window.DataTransfer){selectedFiles=new DataTransfer();input.files=selectedFiles.files;}else{input.value="";}renderFiles();});}renderFiles();});
-document.querySelectorAll("[data-resize-upload]").forEach((form)=>{form.addEventListener("submit",async(event)=>{const input=form.querySelector("input[type='file'][name='files']");if(!input||!window.DataTransfer||input.dataset.resized==="true")return;event.preventDefault();const dt=new DataTransfer();for(const file of Array.from(input.files)){if(!file.type.startsWith("image/")){dt.items.add(file);continue;}const resized=await resizeImage(file,1600,0.76);dt.items.add(resized);}input.files=dt.files;input.dataset.resized="true";form.requestSubmit();});});
-async function resizeImage(file,maxDim,quality){const bitmap=await createImageBitmap(file);const scale=Math.min(1,maxDim/Math.max(bitmap.width,bitmap.height));const width=Math.max(1,Math.round(bitmap.width*scale));const height=Math.max(1,Math.round(bitmap.height*scale));const canvas=document.createElement("canvas");canvas.width=width;canvas.height=height;canvas.getContext("2d").drawImage(bitmap,0,0,width,height);const blob=await new Promise((resolve)=>canvas.toBlob(resolve,"image/jpeg",quality));return new File([blob],file.name.replace(/\.[^.]+$/,"")+".jpg",{type:"image/jpeg",lastModified:file.lastModified});}
+document.querySelectorAll("[data-append-files]").forEach((input)=>{const form=input.closest("form");const fileList=document.getElementById(input.dataset.fileList);const fileCount=document.getElementById("receipt-file-count");const clearButton=form?form.querySelector("[data-clear-files]"):null;let selectedFiles=window.DataTransfer?new DataTransfer():null;const renderFiles=()=>{const files=selectedFiles?selectedFiles.files:input.files;if(fileCount){const count=files.length;fileCount.textContent=count===0?"No files selected":count===1?"1 file selected":count+" files selected";}if(!fileList)return;fileList.innerHTML="";Array.from(files).forEach((file)=>{const item=document.createElement("li");item.textContent=file.name+" ("+Math.max(1,Math.round(file.size/1024))+" KB)";fileList.appendChild(item);});};input.addEventListener("change",()=>{delete input.dataset.resized;Array.from(input.files).forEach(prepareUploadFile);if(selectedFiles){Array.from(input.files).forEach((file)=>selectedFiles.items.add(file));input.files=selectedFiles.files;}renderFiles();});if(clearButton){clearButton.addEventListener("click",()=>{delete input.dataset.resized;if(window.DataTransfer){selectedFiles=new DataTransfer();input.files=selectedFiles.files;}else{input.value="";}renderFiles();});}renderFiles();});
+// Start preparing photos when selected; serialize work to bound phone memory use.
+const preparedUploadFiles=new WeakMap();
+let uploadPreparation=Promise.resolve();
+function prepareUploadFile(file){
+ if(!preparedUploadFiles.has(file)){
+  const prepared=uploadPreparation.then(()=>file.type.startsWith("image/")?resizeImage(file,1600,0.76):file).catch(()=>file);
+  preparedUploadFiles.set(file,prepared);
+  uploadPreparation=prepared.then(()=>{});
+ }
+ return preparedUploadFiles.get(file);
+}
+document.querySelectorAll("[data-resize-upload]").forEach((form)=>{
+ let preparing=false;
+ form.addEventListener("submit",async(event)=>{
+  const input=form.querySelector("input[type='file'][name='files']");
+  if(!input||!window.DataTransfer||input.dataset.resized==="true")return;
+  event.preventDefault();
+  if(preparing)return;
+  preparing=true;
+  const status=form.querySelector(".loading-status span:last-child");
+  if(status)status.textContent="Preparing receipt photos...";
+  const controls=Array.from(form.querySelectorAll("input,select,textarea,button[type='button']"));
+  const disabled=controls.map((control)=>control.disabled);
+  controls.forEach((control)=>control.disabled=true);
+  try{
+   const dt=new DataTransfer();
+   for(const file of Array.from(input.files))dt.items.add(await prepareUploadFile(file));
+   input.files=dt.files;
+  }catch(error){
+   // Submit originals if browser resizing or file replacement is unavailable.
+  }finally{
+   controls.forEach((control,index)=>control.disabled=disabled[index]);
+   input.dataset.resized="true";
+   if(status)status.textContent="Uploading receipt...";
+   preparing=false;
+  }
+  form.requestSubmit();
+ });
+});
+async function resizeImage(file,maxDim,quality){
+ if(typeof createImageBitmap!=="function")return file;
+ const bitmap=await createImageBitmap(file);
+ try{
+  const scale=Math.min(1,maxDim/Math.max(bitmap.width,bitmap.height));
+  const canvas=document.createElement("canvas");
+  canvas.width=Math.max(1,Math.round(bitmap.width*scale));
+  canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+  const context=canvas.getContext("2d");
+  context.fillStyle="#fff";
+  context.fillRect(0,0,canvas.width,canvas.height);
+  context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+  const blob=await new Promise((resolve)=>canvas.toBlob(resolve,"image/jpeg",quality));
+  if(!blob)return file;
+  return new File([blob],file.name.replace(/\.[^.]+$/,"")+".jpg",{type:"image/jpeg",lastModified:file.lastModified});
+ }finally{bitmap.close();}
+}
 document.querySelectorAll("[data-download-link]").forEach((link)=>{link.addEventListener("click",()=>{if(link.classList.contains("is-loading"))return;link.dataset.originalText=link.textContent;link.textContent=link.dataset.loadingText||"Preparing...";link.classList.add("is-loading");link.setAttribute("aria-busy","true");window.setTimeout(()=>{link.textContent=link.dataset.originalText||"Download";link.classList.remove("is-loading");link.removeAttribute("aria-busy");},8000);});});
 `
 
