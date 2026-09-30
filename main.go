@@ -683,17 +683,25 @@ func (a *App) downloadUpload(w http.ResponseWriter, r *http.Request) {
 
 // filenamePart keeps user-entered text safe in a downloadable filename.
 func filenamePart(value string) string {
+	return sanitizeFilenamePart(value, false)
+}
+
+func sanitizeFilenamePart(value string, preserveSpaces bool) string {
 	var b strings.Builder
-	separator := false
+	var separator rune
 	for _, c := range strings.ToLower(strings.TrimSpace(value)) {
 		if unicode.IsLetter(c) || unicode.IsDigit(c) {
-			if separator && b.Len() > 0 {
-				b.WriteByte('-')
+			if separator != 0 && b.Len() > 0 {
+				b.WriteRune(separator)
 			}
 			b.WriteRune(c)
-			separator = false
+			separator = 0
 		} else if c != '\'' && c != '’' {
-			separator = true
+			if preserveSpaces && unicode.IsSpace(c) && separator != '-' {
+				separator = ' '
+			} else {
+				separator = '-'
+			}
 		}
 	}
 	if b.Len() == 0 {
@@ -727,7 +735,7 @@ func receiptFilename(u UploadRow, locations []string, category string) (string, 
 	if len(locations) > 1 {
 		location = "split"
 	}
-	return fmt.Sprintf("%s-%s-%.2f-%s-%s-%s.pdf", date.Format("010206"), filenamePart(u.PurchaseLocation), price, filenamePart(u.Description), filenamePart(category), location), nil
+	return fmt.Sprintf("%s-%s-%.2f-%s-%s-%s.pdf", date.Format("010206"), filenamePart(u.PurchaseLocation), price, sanitizeFilenamePart(u.Description, true), filenamePart(category), location), nil
 }
 
 func (a *App) deleteUpload(id int64) error {

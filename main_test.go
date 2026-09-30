@@ -34,6 +34,11 @@ func TestReceiptFilename(t *testing.T) {
 	if got := filenamePart("../Milk\r\n\" / Supplies"); got != "milk-supplies" {
 		t.Fatal(got)
 	}
+	u.Description = "  Some item   with no dashes  "
+	got, err = receiptFilename(u, []string{"South Roads"}, "Food supplies")
+	if err != nil || got != "092626-sams-19.08-some item with no dashes-food-supplies-south-roads.pdf" {
+		t.Fatalf("description spaces: %q %v", got, err)
+	}
 }
 
 func TestReceiptLifecycle(t *testing.T) {
@@ -49,7 +54,7 @@ func TestReceiptLifecycle(t *testing.T) {
 	if err := os.WriteFile("receipt.pdf", []byte("%PDF-test"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec("INSERT INTO uploads (cardholder_name,total,purchase_location,description,original_filenames,pdf_path,pdf_size_bytes,created_at,archived_at) VALUES ('Person','19.08','sams','milk','a.jpg','receipt.pdf',9,'2026-09-26T15:00:00Z','2026-09-26')")
+	_, err = db.Exec("INSERT INTO uploads (cardholder_name,total,purchase_location,description,original_filenames,pdf_path,pdf_size_bytes,created_at,archived_at) VALUES ('Person','19.08','sams','milk and supplies','a.jpg','receipt.pdf',9,'2026-09-26T15:00:00Z','2026-09-26')")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +78,7 @@ func TestReceiptLifecycle(t *testing.T) {
 	}
 	for _, tc := range []struct{ query, want string }{{"", "blank"}, {"?category_id=1", "food"}} {
 		w = request("GET", "/admin/uploads/1/download"+tc.query, "", app.uploadAction)
-		want := "092626-sams-19.08-milk-" + tc.want + "-split.pdf"
+		want := "092626-sams-19.08-milk and supplies-" + tc.want + "-split.pdf"
 		if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Disposition"), want) || w.Body.String() != "%PDF-test" {
 			t.Fatalf("download: %d %v %s", w.Code, w.Header(), w.Body.String())
 		}

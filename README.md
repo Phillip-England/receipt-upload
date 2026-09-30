@@ -223,7 +223,8 @@ make clean
 Downloads use `MMDDYY-vendor-price-description-category-location.pdf`, for example
 `092626-sams-19.08-milk-blank-split.pdf`. The date is the upload date in
 America/Chicago, and the price has two decimal places. Names are lowercase with
-spaces and punctuation converted to hyphens (apostrophes are removed).
+punctuation converted to hyphens (apostrophes are removed). Spaces in the
+description are preserved; spaces in other fields become hyphens.
 A single selected location uses its name; two or more use `split`.
 Missing descriptions, categories, or locations use literal `blank`.
 
