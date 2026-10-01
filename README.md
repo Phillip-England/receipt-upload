@@ -12,7 +12,9 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 - Cardholder and store management from the admin portal.
 - Multiple store checkboxes per receipt.
 - Multiple receipt images per upload, resized and merged into one PDF.
-- Client-side image shrinking starts when photos are selected, so preparation can finish before Upload is pressed; unsupported images fall back to server processing.
+- Uploads stream original images to a durable queue and return before conversion.
+- A separate worker polls `data/queue` every second and converts one receipt at a time.
+- Admin conversion jobs show queued, processing, and failed receipts, with retry controls.
 - Already-prepared RGB JPEGs up to 1600 pixels and 512 KB are embedded in PDFs without a second compression pass.
 - Server-side image resizing and JPEG compression before PDF generation.
 - Uploaded PDFs stored on disk.
@@ -49,7 +51,9 @@ No separate PDF dependency setup is needed. Initialize and start the installed a
 ```bash
 receipt-upload init
 # Edit ADMIN_PASSWORD in ./config/.env, then:
-receipt-upload
+receipt-upload serve
+# In a second terminal, from the same directory:
+receipt-upload worker
 ```
 
 The developer documentation is served at `http://localhost:8725/`. The admin-only login portal is at `http://localhost:8725/admin/login`. To select another bind address or port:
@@ -80,6 +84,8 @@ Start the app only after validation succeeds:
 
 ```bash
 receipt-upload serve
+# In another terminal, using the same working directory and configuration:
+receipt-upload worker
 ```
 
 To initialize only one part, use `receipt-upload config init` or
@@ -102,6 +108,7 @@ receipt-upload init --config ./runtime/app.env
 receipt-upload database init
 receipt-upload --config ./runtime/app.env
 receipt-upload serve --config ./runtime/app.env
+receipt-upload worker --config ./runtime/app.env
 receipt-upload serve --config ./runtime/app.env --host 0.0.0.0 --port 8725
 receipt-upload config init --path ./runtime/app.env
 receipt-upload config init --path ./runtime/app.env --force
@@ -167,7 +174,7 @@ Cardholders open the secret upload link and submit:
 - Optional notes.
 - One or more receipt images.
 
-Each submission becomes one final PDF.
+Each submission is acknowledged once the originals and metadata are saved. PDF conversion runs later in the worker. Unsupported or corrupt images appear as failed jobs in administration; their originals remain available for retry.
 
 ## Receipt Storage
 
@@ -176,11 +183,18 @@ The app stores data under `./data`.
 ```text
 data/
   main.sqlite
+  queue/
+    <job-id>/
+      000000  # original image bytes, in upload order
+      000001
+    worker.lock
   receipts/
     <generated-id>.pdf
 ```
 
-SQLite stores receipt metadata, selected stores, timestamps, deletion status, and PDF paths.
+SQLite stores receipt metadata, selected stores, timestamps, deletion status, PDF paths, and conversion job status. The worker processes only directories registered as queued jobs in SQLite; arbitrary files dropped in the directory are not treated as receipts.
+
+Run `serve` and `worker` as two supervised processes using the same working directory and config file. Only one worker may run for a data directory. Interrupted processing jobs return to the queue on worker restart. PDFs are published with an atomic rename, and receipt size and completion status are committed together, so restarting does not duplicate receipts. Original images are deleted after successful conversion; failed jobs retain them. Receipt dates and cardholder/location names are captured at upload time. The admin job panel refreshes every five seconds; refresh the dashboard to see newly completed PDFs.
 
 ## Login Ban System
 
@@ -206,7 +220,9 @@ docker run --rm -p 8725:8725 \
   receipt-upload
 ```
 
-Uploaded PDFs and SQLite data are stored under `/app/data` in Docker.
+The default Docker command supervises two separate processes: the web server and conversion worker. If either exits, the container exits so a restart policy can restart both. Use `--restart unless-stopped` for persistent deployments. Overriding the Docker command with `receipt-upload serve` starts only the web server, so run a separate worker container sharing the same data and config mounts.
+
+Original queued images, PDFs, and SQLite data are stored under `/app/data` in Docker.
 
 ## Make Targets
 
@@ -214,6 +230,7 @@ Uploaded PDFs and SQLite data are stored under `/app/data` in Docker.
 make install
 make sync
 make run
+make worker  # second terminal
 make check
 make clean
 ```

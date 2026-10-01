@@ -33,7 +33,6 @@ import (
 	_ "time/tzdata"
 	"unicode"
 
-	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
@@ -185,6 +184,12 @@ func run(args []string) error {
 			return errors.New("usage: receipt-upload database init")
 		}
 		return initDataDir()
+	case "worker":
+		rest, cfg := consumeConfig(args[1:], config)
+		if len(rest) != 0 {
+			return errors.New("usage: receipt-upload worker --config path")
+		}
+		return runWorker(cfg)
 	case "serve":
 		host := "0.0.0.0"
 		port := "8725"
@@ -278,7 +283,7 @@ func run(args []string) error {
 }
 
 func normalizeArgs(args []string) []string {
-	commands := map[string]bool{"init": true, "config": true, "database": true, "serve": true, "generate-secret-key": true, "generate-upload-token": true, "set-username": true, "set-password": true, "set-config": true, "list-banned-ips": true, "unban-ip": true}
+	commands := map[string]bool{"init": true, "config": true, "database": true, "serve": true, "worker": true, "generate-secret-key": true, "generate-upload-token": true, "set-username": true, "set-password": true, "set-config": true, "list-banned-ips": true, "unban-ip": true}
 	hasCommand := false
 	for _, arg := range args {
 		if commands[arg] {
@@ -362,6 +367,8 @@ func serve(configPath, host, port string) error {
 	mux.HandleFunc("/admin/cardholders/", app.cardholderAction)
 	mux.HandleFunc("/admin/stores", app.addStore)
 	mux.HandleFunc("/admin/stores/", app.storeAction)
+	mux.HandleFunc("/admin/jobs", app.jobsStatus)
+	mux.HandleFunc("/admin/jobs/", app.retryJob)
 	mux.HandleFunc("/admin/uploads/", app.uploadAction)
 	mux.HandleFunc("/admin/categories", app.categoryAction)
 	mux.HandleFunc("/admin/categories/", app.categoryAction)
@@ -378,6 +385,9 @@ func serve(configPath, host, port string) error {
 }
 
 func (s Settings) dbPath() string {
+	if s.DataDir != "" {
+		return filepath.Join(s.DataDir, "main.sqlite")
+	}
 	return defaultDBPath
 }
 
@@ -628,7 +638,7 @@ func (a *App) downloadUpload(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 	var pdfPath string
 	var receipt UploadRow
-	if err := db.QueryRow("SELECT pdf_path, created_at, purchase_location, total, COALESCE(description, '') FROM uploads WHERE id = ?", id).Scan(&pdfPath, &receipt.CreatedAt, &receipt.PurchaseLocation, &receipt.Total, &receipt.Description); err != nil {
+	if err := db.QueryRow("SELECT pdf_path, created_at, purchase_location, total, COALESCE(description, '') FROM uploads WHERE id = ? AND NOT EXISTS (SELECT 1 FROM receipt_jobs WHERE upload_id=uploads.id AND status!='completed')", id).Scan(&pdfPath, &receipt.CreatedAt, &receipt.PurchaseLocation, &receipt.Total, &receipt.Description); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -814,89 +824,10 @@ func (a *App) upload(w http.ResponseWriter, r *http.Request) {
 			writeHTML(w, renderUpload(token, opts, err.Error(), ""))
 			return
 		}
-		writeHTML(w, renderUpload(token, opts, "", "Receipt uploaded."))
+		writeHTML(w, renderUpload(token, opts, "", "Receipt received. PDF conversion is queued."))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-func (a *App) handleUpload(r *http.Request) error {
-	reader, err := r.MultipartReader()
-	if err != nil {
-		return err
-	}
-	text := map[string][]string{}
-	images := []PdfImage{}
-	filenames := []string{}
-	var totalBytes int64
-	for {
-		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		name := part.FormName()
-		if name == "files" {
-			filename := part.FileName()
-			if filename == "" {
-				filename = "receipt"
-			}
-			data, err := readLimitedPart(part, a.settings.MaxUploadBytes-totalBytes+1)
-			if err != nil {
-				return err
-			}
-			if len(data) == 0 {
-				continue
-			}
-			totalBytes += int64(len(data))
-			if totalBytes > a.settings.MaxUploadBytes {
-				return errors.New("Upload is too large.")
-			}
-			img, err := preparePDFImage(data)
-			if err != nil {
-				return fmt.Errorf("Could not read %s as a receipt image", filename)
-			}
-			images = append(images, img)
-			filenames = append(filenames, filename)
-		} else {
-			data, _ := io.ReadAll(part)
-			text[name] = append(text[name], string(data))
-		}
-	}
-	if len(images) == 0 {
-		return errors.New("Please choose at least one receipt image.")
-	}
-	cardholderID, err := strconv.ParseInt(requiredText(text, "cardholder_id"), 10, 64)
-	if err != nil {
-		return errors.New("Please select a valid cardholder.")
-	}
-	total := strings.TrimSpace(requiredText(text, "total"))
-	purchaseLocation := strings.TrimSpace(requiredText(text, "purchase_location"))
-	if total == "" || purchaseLocation == "" {
-		return errors.New("Total and place of purchase are required.")
-	}
-	description := firstText(text, "description")
-	notes := firstText(text, "notes")
-	storeIDs := []int64{}
-	for _, raw := range text["store_ids"] {
-		if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			storeIDs = append(storeIDs, id)
-		}
-	}
-	if err := os.MkdirAll(a.settings.UploadDir, 0755); err != nil {
-		return err
-	}
-	outputPath := filepath.Join(a.settings.UploadDir, uuid.NewString()+".pdf")
-	if err := writePDF(images, outputPath); err != nil {
-		return err
-	}
-	stat, err := os.Stat(outputPath)
-	if err != nil {
-		return err
-	}
-	return saveReceipt(a.settings, cardholderID, total, purchaseLocation, description, notes, storeIDs, filenames, outputPath, stat.Size())
 }
 
 func readLimitedPart(part *multipart.Part, limit int64) ([]byte, error) {
@@ -1011,9 +942,17 @@ func saveReceipt(settings Settings, cardholderID int64, total, purchaseLocation,
 		return err
 	}
 	defer tx.Rollback()
+	_, err = insertReceipt(tx, cardholderID, total, purchaseLocation, description, notes, storeIDs, filenames, pdfPath, pdfSize)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertReceipt(tx *sql.Tx, cardholderID int64, total, purchaseLocation, description, notes string, storeIDs []int64, filenames []string, pdfPath string, pdfSize int64) (int64, error) {
 	var cardholderName string
 	if err := tx.QueryRow("SELECT name FROM cardholders WHERE id = ?", cardholderID).Scan(&cardholderName); err != nil {
-		return errors.New("Please select a valid cardholder.")
+		return 0, errors.New("Please select a valid cardholder.")
 	}
 	storePairs := []NamedRow{}
 	for _, storeID := range storeIDs {
@@ -1028,15 +967,15 @@ func saveReceipt(settings Settings, cardholderID int64, total, purchaseLocation,
 	}
 	res, err := tx.Exec("INSERT INTO uploads (cardholder_id, cardholder_name, total, purchase_location, description, notes, store_names, original_filenames, pdf_path, pdf_size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", cardholderID, cardholderName, total, purchaseLocation, description, notes, strings.Join(storeNames, ", "), strings.Join(filenames, ", "), pdfPath, pdfSize, nowISO())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	uploadID, _ := res.LastInsertId()
 	for _, store := range storePairs {
 		if _, err := tx.Exec("INSERT INTO receipt_stores (upload_id, store_id, store_name) VALUES (?, ?, ?)", uploadID, store.ID, store.Name); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return tx.Commit()
+	return uploadID, nil
 }
 
 func openDB(path string) (*sql.DB, error) {
@@ -1068,6 +1007,8 @@ CREATE TABLE IF NOT EXISTS stores (id INTEGER PRIMARY KEY AUTOINCREMENT, name TE
 CREATE TABLE IF NOT EXISTS uploads (id INTEGER PRIMARY KEY AUTOINCREMENT, cardholder_id INTEGER, cardholder_name TEXT NOT NULL, total TEXT NOT NULL, purchase_location TEXT NOT NULL, description TEXT, notes TEXT, store_names TEXT, original_filenames TEXT NOT NULL, pdf_path TEXT NOT NULL, pdf_size_bytes INTEGER NOT NULL, archived_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(cardholder_id) REFERENCES cardholders(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS receipt_stores (upload_id INTEGER NOT NULL, store_id INTEGER, store_name TEXT NOT NULL, PRIMARY KEY(upload_id, store_name), FOREIGN KEY(upload_id) REFERENCES uploads(id) ON DELETE CASCADE, FOREIGN KEY(store_id) REFERENCES stores(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip_address TEXT NOT NULL UNIQUE, failed_count INTEGER NOT NULL, last_attempt_at TEXT NOT NULL, banned_until TEXT);
+CREATE TABLE IF NOT EXISTS receipt_jobs (id TEXT PRIMARY KEY, upload_id INTEGER NOT NULL UNIQUE REFERENCES uploads(id) ON DELETE CASCADE, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS receipt_jobs_status_created ON receipt_jobs(status, created_at);
 CREATE TABLE IF NOT EXISTS app_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);`
 	if _, err := db.Exec(schema); err != nil {
 		return err
@@ -1193,7 +1134,7 @@ func namedRows(db *sql.DB, query string) ([]NamedRow, error) {
 }
 
 func uploadRows(db *sql.DB) ([]UploadRow, error) {
-	rows, err := db.Query("SELECT id, cardholder_name, total, purchase_location, COALESCE(description, ''), COALESCE(notes, ''), COALESCE(store_names, ''), pdf_size_bytes, deleted_at, created_at FROM uploads ORDER BY deleted_at IS NOT NULL, created_at DESC")
+	rows, err := db.Query("SELECT id, cardholder_name, total, purchase_location, COALESCE(description, ''), COALESCE(notes, ''), COALESCE(store_names, ''), pdf_size_bytes, deleted_at, created_at FROM uploads WHERE NOT EXISTS (SELECT 1 FROM receipt_jobs WHERE upload_id = uploads.id AND status != 'completed') ORDER BY deleted_at IS NOT NULL, created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -1222,8 +1163,10 @@ func renderDocs() string {
 receipt-upload init
 # Edit ADMIN_PASSWORD in ./config/.env
 receipt-upload config check
-receipt-upload serve</code></pre></div><div class="callout"><strong>Default address</strong><span>Documentation is available at <code>http://localhost:8725/</code>. Administration lives at <code>/admin/login</code>.</span></div></section>
-<section class="docs-section" id="workflow"><div class="section-intro"><p class="eyebrow">How it works</p><h2>One administrator, simple links for everyone else</h2></div><div class="step-grid"><article><span class="step-number">01</span><h3>Configure</h3><p>The admin creates cardholders and stores, then chooses the public hostname and secret upload code.</p></article><article><span class="step-number">02</span><h3>Share</h3><p>Send the generated private upload URL to cardholders. They do not create accounts or sign in.</p></article><article><span class="step-number">03</span><h3>Collect</h3><p>Cardholders select their name, add expense details, and attach one or more receipt photos.</p></article><article><span class="step-number">04</span><h3>Review</h3><p>The app resizes images, builds one PDF per expense, and makes it available in the admin portal.</p></article></div></section>
+receipt-upload serve
+# In a second terminal:
+receipt-upload worker</code></pre></div><div class="callout"><strong>Default address</strong><span>Documentation is available at <code>http://localhost:8725/</code>. Administration lives at <code>/admin/login</code>.</span></div></section>
+<section class="docs-section" id="workflow"><div class="section-intro"><p class="eyebrow">How it works</p><h2>One administrator, simple links for everyone else</h2></div><div class="step-grid"><article><span class="step-number">01</span><h3>Configure</h3><p>The admin creates cardholders and stores, then chooses the public hostname and secret upload code.</p></article><article><span class="step-number">02</span><h3>Share</h3><p>Send the generated private upload URL to cardholders. They do not create accounts or sign in.</p></article><article><span class="step-number">03</span><h3>Collect</h3><p>Cardholders select their name, add expense details, and attach one or more receipt photos.</p></article><article><span class="step-number">04</span><h3>Review</h3><p>Uploads are saved immediately. A separate worker resizes images and builds PDFs; administration shows queued, processing, and failed jobs.</p></article></div></section>
 <section class="docs-section"><div class="section-intro"><p class="eyebrow">Configuration</p><h2>Environment-style config file</h2><p>The application reads the file passed with <code>--config</code> (default: <code>./config/.env</code>). Runtime environment variables are not merged in.</p></div><div class="config-list"><div><code>ADMIN_USERNAME</code><span>Administrator login name</span></div><div><code>ADMIN_PASSWORD</code><span>Administrator password</span></div><div><code>SECRET_KEY</code><span>Signs admin session cookies</span></div><div><code>UPLOAD_TOKEN</code><span>Initial private upload-link token</span></div><div><code>APP_BASE_URL</code><span>Public origin used when building links</span></div><div><code>MAX_UPLOAD_MB</code><span>Maximum size of one submission</span></div></div></section>
 <section class="docs-section"><div class="section-intro"><p class="eyebrow">Deployment</p><h2>Docker or a standalone binary</h2></div><div class="deploy-grid"><div><h3>Standalone</h3><pre><code>receipt-upload serve \
   --config ./runtime/app.env \
@@ -1232,7 +1175,7 @@ receipt-upload serve</code></pre></div><div class="callout"><strong>Default addr
 docker run --rm -p 8725:8725 \
   -v "$PWD/config/.env:/app/config/.env:ro" \
   -v receipt-upload-data:/app/data \
-  receipt-upload</code></pre></div></div><p class="docs-note">Persist <code>./data</code>. It contains <code>main.sqlite</code> and generated receipt PDFs.</p></section>
+  receipt-upload</code></pre></div></div><p class="docs-note">Persist <code>./data</code>. It contains <code>main.sqlite</code>, queued original images, and generated receipt PDFs. The default Docker command runs both the web server and worker.</p></section>
 <section class="docs-section"><div class="section-intro"><p class="eyebrow">Operational notes</p><h2>Designed to stay small</h2></div><div class="feature-grid"><article><h3>Image processing included</h3><p>Phone photos are resized to a maximum 1600px dimension and JPEG-compressed before PDF generation. No external converter is required.</p></article><article><h3>Local, portable data</h3><p>Metadata lives in one SQLite database at <code>./data/main.sqlite</code> and receipt PDFs live beside it under <code>./data/receipts</code>.</p></article><article><h3>Protected administration</h3><p>Three failed login attempts ban an IP for 24 hours. The CLI can list and remove ban records.</p></article></div></section></main>`
 	return layout("receipt-upload — Developer documentation", body)
 }
@@ -1263,7 +1206,7 @@ func renderAdmin(settings Settings, uploadToken, appBaseURL string, view AdminVi
 	}
 	uploads := renderReceiptRows(view, false)
 	graveyard := renderReceiptRows(view, true)
-	return layout("Admin", fmt.Sprintf(`<header class="topbar"><div><h1>receipt-upload</h1><p>%s used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">%s</section><section class="panel wide"><h2>Secret Upload Link</h2>%s<div class="copy-row"><input readonly value="%s" aria-label="Current secret upload link"><a class="button" href="%s" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Public hostname / base URL <input name="app_base_url" type="url" value="%s" placeholder="https://receipts.example.com" autocomplete="url" required></label><label>Secret code <input name="secret_code" value="%s" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">The public URL is saved for future links. Changing the secret code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel"><h2>Locations</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Location" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel" id="categories"><h2>Expense categories</h2><form class="inline-form" method="post" action="/admin/categories"><input name="name" placeholder="Category name" aria-label="Expense category name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel wide"><h2>Receipts</h2><p>Choose an expense category when downloading. No category uses literal “blank” in the filename. <a href="#graveyard">Open receipt graveyard</a></p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Locations</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section><section class="panel wide" id="graveyard"><h2>Receipt graveyard</h2><p>Deleted receipts stay here until you restore or permanently delete them.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Locations</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section></main>`, view.DiskUsage, defaultWarning(settings), message("alert", uploadLinkError), esc(uploadURL(appBaseURL, uploadToken)), esc(uploadURL(appBaseURL, uploadToken)), esc(appBaseURL), esc(uploadToken), cardholders, stores, categories.String(), uploads, graveyard))
+	return layout("Admin", fmt.Sprintf(`<header class="topbar"><div><h1>receipt-upload</h1><p>%s used by this app</p></div><form method="post" action="/admin/logout"><button class="secondary" type="submit">Log out</button></form></header><main class="admin-grid"><section class="wide">%s</section><section class="panel wide"><h2>Secret Upload Link</h2>%s<div class="copy-row"><input readonly value="%s" aria-label="Current secret upload link"><a class="button" href="%s" target="_blank">Open</a></div><form class="secret-code-form" method="post" action="/admin/upload-link"><label>Public hostname / base URL <input name="app_base_url" type="url" value="%s" placeholder="https://receipts.example.com" autocomplete="url" required></label><label>Secret code <input name="secret_code" value="%s" minlength="8" maxlength="128" pattern="[A-Za-z0-9_-]+" autocomplete="off" required></label><button type="submit">Change link</button></form><p class="help-text">The public URL is saved for future links. Changing the secret code immediately disables the old upload link.</p></section><section class="panel"><h2>Cardholders</h2><form class="inline-form" method="post" action="/admin/cardholders"><input name="name" placeholder="Name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel"><h2>Locations</h2><form class="inline-form" method="post" action="/admin/stores"><input name="name" placeholder="Location" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel" id="categories"><h2>Expense categories</h2><form class="inline-form" method="post" action="/admin/categories"><input name="name" placeholder="Category name" aria-label="Expense category name" required><button type="submit">Add</button></form><ul class="manage-list">%s</ul></section><section class="panel wide" id="jobs"><h2>Conversion jobs</h2><p>Queued, processing, and failed receipts. Status updates every five seconds.</p><div data-jobs>Loading jobs…</div></section><section class="panel wide"><h2>Receipts</h2><p>Choose an expense category when downloading. No category uses literal “blank” in the filename. <a href="#graveyard">Open receipt graveyard</a></p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Locations</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section><section class="panel wide" id="graveyard"><h2>Receipt graveyard</h2><p>Deleted receipts stay here until you restore or permanently delete them.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Cardholder</th><th>Total</th><th>Purchased At</th><th>Locations</th><th>Description</th><th>PDF</th><th>Status</th><th>Actions</th></tr></thead><tbody>%s</tbody></table></div></section></main>`, view.DiskUsage, defaultWarning(settings), message("alert", uploadLinkError), esc(uploadURL(appBaseURL, uploadToken)), esc(uploadURL(appBaseURL, uploadToken)), esc(appBaseURL), esc(uploadToken), cardholders, stores, categories.String(), uploads, graveyard))
 }
 
 func renderReceiptRows(view AdminView, deleted bool) string {
@@ -1308,7 +1251,7 @@ func renderUpload(token string, view UploadOptions, errMsg, success string) stri
 		}
 		stores = b.String()
 	}
-	return layout("Upload Receipt", fmt.Sprintf(`<main class="upload-shell"><section class="upload-panel"><h1>Upload Receipt</h1>%s%s<form method="post" action="/upload/%s" enctype="multipart/form-data" class="stack" data-loading-form data-resize-upload><label>Cardholder<select name="cardholder_id" required><option value="">Select a name</option>%s</select></label><label>Total <input name="total" inputmode="decimal" placeholder="42.50" required></label><label>Place of Purchase <input name="purchase_location" placeholder="Vendor or location" required></label><label>Description <input name="description" placeholder="Business purpose or expense label"></label><fieldset><legend>Locations</legend><div class="check-list">%s</div></fieldset><label>Notes <textarea name="notes" rows="4"></textarea></label><label>Receipt Images<input name="files" type="file" multiple accept="image/*" required data-append-files data-file-list="receipt-file-list"></label><div class="file-selection" aria-live="polite"><div class="file-selection-header"><span id="receipt-file-count">No files selected</span><button class="secondary" type="button" data-clear-files>Clear</button></div><ul id="receipt-file-list" class="selected-files"></ul></div><button type="submit" data-loading-text="Uploading...">Upload</button><div class="loading-status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Uploading receipt.</span></div></form></section></main>`, message("success", success), message("alert", errMsg), esc(token), cardholders.String(), stores))
+	return layout("Upload Receipt", fmt.Sprintf(`<main class="upload-shell"><section class="upload-panel"><h1>Upload Receipt</h1>%s%s<form method="post" action="/upload/%s" enctype="multipart/form-data" class="stack" data-loading-form><label>Cardholder<select name="cardholder_id" required><option value="">Select a name</option>%s</select></label><label>Total <input name="total" inputmode="decimal" placeholder="42.50" required></label><label>Place of Purchase <input name="purchase_location" placeholder="Vendor or location" required></label><label>Description <input name="description" placeholder="Business purpose or expense label"></label><fieldset><legend>Locations</legend><div class="check-list">%s</div></fieldset><label>Notes <textarea name="notes" rows="4"></textarea></label><label>Receipt Images<input name="files" type="file" multiple accept="image/*" required data-append-files data-file-list="receipt-file-list"></label><div class="file-selection" aria-live="polite"><div class="file-selection-header"><span id="receipt-file-count">No files selected</span><button class="secondary" type="button" data-clear-files>Clear</button></div><ul id="receipt-file-list" class="selected-files"></ul></div><button type="submit" data-loading-text="Uploading...">Upload</button><div class="loading-status" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Uploading receipt.</span></div></form></section></main>`, message("success", success), message("alert", errMsg), esc(token), cardholders.String(), stores))
 }
 
 func layout(title, body string) string {
@@ -1316,64 +1259,11 @@ func layout(title, body string) string {
 }
 
 const clientJS = `
+const jobPanel=document.querySelector("[data-jobs]");
+if(jobPanel){const refresh=async()=>{try{const response=await fetch("/admin/jobs");if(!response.ok||response.redirected)throw new Error();jobPanel.innerHTML=await response.text();}catch(error){jobPanel.textContent="Unable to load jobs. Refresh to try again.";}};refresh();setInterval(refresh,5000);}
+
 document.querySelectorAll("[data-loading-form]").forEach((form)=>{form.addEventListener("submit",()=>{form.classList.add("is-loading");form.setAttribute("aria-busy","true");form.querySelectorAll("button[type='submit']").forEach((button)=>{button.dataset.originalText=button.textContent;button.textContent=button.dataset.loadingText||"Working...";button.disabled=true;});});});
-document.querySelectorAll("[data-append-files]").forEach((input)=>{const form=input.closest("form");const fileList=document.getElementById(input.dataset.fileList);const fileCount=document.getElementById("receipt-file-count");const clearButton=form?form.querySelector("[data-clear-files]"):null;let selectedFiles=window.DataTransfer?new DataTransfer():null;const renderFiles=()=>{const files=selectedFiles?selectedFiles.files:input.files;if(fileCount){const count=files.length;fileCount.textContent=count===0?"No files selected":count===1?"1 file selected":count+" files selected";}if(!fileList)return;fileList.innerHTML="";Array.from(files).forEach((file)=>{const item=document.createElement("li");item.textContent=file.name+" ("+Math.max(1,Math.round(file.size/1024))+" KB)";fileList.appendChild(item);});};input.addEventListener("change",()=>{delete input.dataset.resized;Array.from(input.files).forEach(prepareUploadFile);if(selectedFiles){Array.from(input.files).forEach((file)=>selectedFiles.items.add(file));input.files=selectedFiles.files;}renderFiles();});if(clearButton){clearButton.addEventListener("click",()=>{delete input.dataset.resized;if(window.DataTransfer){selectedFiles=new DataTransfer();input.files=selectedFiles.files;}else{input.value="";}renderFiles();});}renderFiles();});
-// Start preparing photos when selected; serialize work to bound phone memory use.
-const preparedUploadFiles=new WeakMap();
-let uploadPreparation=Promise.resolve();
-function prepareUploadFile(file){
- if(!preparedUploadFiles.has(file)){
-  const prepared=uploadPreparation.then(()=>file.type.startsWith("image/")?resizeImage(file,1600,0.76):file).catch(()=>file);
-  preparedUploadFiles.set(file,prepared);
-  uploadPreparation=prepared.then(()=>{});
- }
- return preparedUploadFiles.get(file);
-}
-document.querySelectorAll("[data-resize-upload]").forEach((form)=>{
- let preparing=false;
- form.addEventListener("submit",async(event)=>{
-  const input=form.querySelector("input[type='file'][name='files']");
-  if(!input||!window.DataTransfer||input.dataset.resized==="true")return;
-  event.preventDefault();
-  if(preparing)return;
-  preparing=true;
-  const status=form.querySelector(".loading-status span:last-child");
-  if(status)status.textContent="Preparing receipt photos...";
-  const controls=Array.from(form.querySelectorAll("input,select,textarea,button[type='button']"));
-  const disabled=controls.map((control)=>control.disabled);
-  controls.forEach((control)=>control.disabled=true);
-  try{
-   const dt=new DataTransfer();
-   for(const file of Array.from(input.files))dt.items.add(await prepareUploadFile(file));
-   input.files=dt.files;
-  }catch(error){
-   // Submit originals if browser resizing or file replacement is unavailable.
-  }finally{
-   controls.forEach((control,index)=>control.disabled=disabled[index]);
-   input.dataset.resized="true";
-   if(status)status.textContent="Uploading receipt...";
-   preparing=false;
-  }
-  form.requestSubmit();
- });
-});
-async function resizeImage(file,maxDim,quality){
- if(typeof createImageBitmap!=="function")return file;
- const bitmap=await createImageBitmap(file);
- try{
-  const scale=Math.min(1,maxDim/Math.max(bitmap.width,bitmap.height));
-  const canvas=document.createElement("canvas");
-  canvas.width=Math.max(1,Math.round(bitmap.width*scale));
-  canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-  const context=canvas.getContext("2d");
-  context.fillStyle="#fff";
-  context.fillRect(0,0,canvas.width,canvas.height);
-  context.drawImage(bitmap,0,0,canvas.width,canvas.height);
-  const blob=await new Promise((resolve)=>canvas.toBlob(resolve,"image/jpeg",quality));
-  if(!blob)return file;
-  return new File([blob],file.name.replace(/\.[^.]+$/,"")+".jpg",{type:"image/jpeg",lastModified:file.lastModified});
- }finally{bitmap.close();}
-}
+document.querySelectorAll("[data-append-files]").forEach((input)=>{const form=input.closest("form");const fileList=document.getElementById(input.dataset.fileList);const fileCount=document.getElementById("receipt-file-count");const clearButton=form?form.querySelector("[data-clear-files]"):null;let selectedFiles=window.DataTransfer?new DataTransfer():null;const renderFiles=()=>{const files=selectedFiles?selectedFiles.files:input.files;if(fileCount){const count=files.length;fileCount.textContent=count===0?"No files selected":count===1?"1 file selected":count+" files selected";}if(!fileList)return;fileList.innerHTML="";Array.from(files).forEach((file)=>{const item=document.createElement("li");item.textContent=file.name+" ("+Math.max(1,Math.round(file.size/1024))+" KB)";fileList.appendChild(item);});};input.addEventListener("change",()=>{delete input.dataset.resized;if(selectedFiles){Array.from(input.files).forEach((file)=>selectedFiles.items.add(file));input.files=selectedFiles.files;}renderFiles();});if(clearButton){clearButton.addEventListener("click",()=>{delete input.dataset.resized;if(window.DataTransfer){selectedFiles=new DataTransfer();input.files=selectedFiles.files;}else{input.value="";}renderFiles();});}renderFiles();});
 document.querySelectorAll("[data-download-link]").forEach((link)=>{link.addEventListener("click",()=>{if(link.classList.contains("is-loading"))return;link.dataset.originalText=link.textContent;link.textContent=link.dataset.loadingText||"Preparing...";link.classList.add("is-loading");link.setAttribute("aria-busy","true");window.setTimeout(()=>{link.textContent=link.dataset.originalText||"Download";link.classList.remove("is-loading");link.removeAttribute("aria-busy");},8000);});});
 `
 

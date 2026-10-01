@@ -1,4 +1,4 @@
-.PHONY: install sync run check clean
+.PHONY: install sync run worker check clean
 
 install:
 	go install .
@@ -9,8 +9,11 @@ sync:
 run:
 	go run . serve --host 0.0.0.0 --port 8725
 
+worker:
+	go run . worker
+
 check:
-	gofmt -w main.go
+	gofmt -w *.go
 	go test ./...
 
 clean:
