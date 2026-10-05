@@ -299,7 +299,7 @@ func (a *App) jobsStatus(w http.ResponseWriter, r *http.Request) {
 		count++
 		action := ""
 		if status == "failed" {
-			action = fmt.Sprintf(`<form method="post" action="/admin/jobs/%s/retry"><button type="submit">Retry</button></form>`, esc(id))
+			action = fmt.Sprintf(`<form method="post" action="/admin/jobs/%s/retry"><button type="submit">Retry</button></form><form method="post" action="/admin/jobs/%s/clear"><button class="danger" type="submit">Clear</button></form>`, esc(id), esc(id))
 		}
 		fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s%s</td></tr>`, esc(created), esc(name), esc(vendor), esc(status), esc(updated), esc(problem), action)
 	}
@@ -324,9 +324,18 @@ func (a *App) retryJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/admin/jobs/"), "/retry")
-	if _, err := uuid.Parse(id); err != nil || !strings.HasSuffix(r.URL.Path, "/retry") {
+	action := filepath.Base(r.URL.Path)
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/admin/jobs/"), "/"+action)
+	if _, err := uuid.Parse(id); err != nil || (action != "retry" && action != "clear") {
 		http.NotFound(w, r)
+		return
+	}
+	if action == "clear" {
+		if err := a.clearFailedJob(id); err != nil {
+			serverError(w, err)
+			return
+		}
+		http.Redirect(w, r, "/admin#jobs", http.StatusSeeOther)
 		return
 	}
 	if err := execSQL(a.settings.dbPath(), "UPDATE receipt_jobs SET status='queued',error='',updated_at=? WHERE id=? AND status='failed'", nowISO(), id); err != nil {
@@ -334,4 +343,43 @@ func (a *App) retryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/admin#jobs", http.StatusSeeOther)
+}
+
+// clearFailedJob claims the failed row before cleanup so a concurrent retry
+// cannot start processing files that are being removed.
+func (a *App) clearFailedJob(id string) error {
+	db, err := openDB(a.settings.dbPath())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var uploadID int64
+	err = tx.QueryRow("DELETE FROM receipt_jobs WHERE id=? AND status='failed' RETURNING upload_id", id).Scan(&uploadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var output string
+	if err = tx.QueryRow("SELECT pdf_path FROM uploads WHERE id=?", uploadID).Scan(&output); err != nil {
+		return err
+	}
+	if err = os.RemoveAll(filepath.Join(a.settings.queueDir(), id)); err != nil {
+		return err
+	}
+	for _, path := range []string{output, output + ".tmp"} {
+		if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if _, err = tx.Exec("DELETE FROM uploads WHERE id=?", uploadID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

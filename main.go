@@ -693,10 +693,10 @@ func (a *App) downloadUpload(w http.ResponseWriter, r *http.Request) {
 
 // filenamePart keeps user-entered text safe in a downloadable filename.
 func filenamePart(value string) string {
-	return sanitizeFilenamePart(value, false)
+	return sanitizeFilenamePart(value)
 }
 
-func sanitizeFilenamePart(value string, preserveSpaces bool) string {
+func sanitizeFilenamePart(value string) string {
 	var b strings.Builder
 	var separator rune
 	for _, c := range strings.ToLower(strings.TrimSpace(value)) {
@@ -706,12 +706,8 @@ func sanitizeFilenamePart(value string, preserveSpaces bool) string {
 			}
 			b.WriteRune(c)
 			separator = 0
-		} else if c != '\'' && c != '’' {
-			if preserveSpaces && unicode.IsSpace(c) && separator != '-' {
-				separator = ' '
-			} else {
-				separator = '-'
-			}
+		} else if c != '\'' && c != '’' && c != '-' {
+			separator = ' '
 		}
 	}
 	if b.Len() == 0 {
@@ -738,6 +734,10 @@ func receiptFilename(u UploadRow, locations []string, category string) (string, 
 	if err != nil || math.IsNaN(price) || math.IsInf(price, 0) || price < 0 {
 		return "", errors.New("receipt total must be a non-negative amount")
 	}
+	// Normalize negative zero so the price cannot introduce another hyphen.
+	if price == 0 {
+		price = 0
+	}
 	location := "blank"
 	if len(locations) == 1 {
 		location = filenamePart(locations[0])
@@ -745,7 +745,7 @@ func receiptFilename(u UploadRow, locations []string, category string) (string, 
 	if len(locations) > 1 {
 		location = "split"
 	}
-	return fmt.Sprintf("%s-%s-%.2f-%s-%s-%s.pdf", date.Format("010206"), filenamePart(u.PurchaseLocation), price, sanitizeFilenamePart(u.Description, true), filenamePart(category), location), nil
+	return fmt.Sprintf("%s-%s-%.2f-%s-%s-%s.pdf", date.Format("010206"), filenamePart(u.PurchaseLocation), price, filenamePart(u.Description), filenamePart(category), location), nil
 }
 
 func (a *App) deleteUpload(id int64) error {

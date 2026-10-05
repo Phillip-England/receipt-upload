@@ -18,12 +18,15 @@ func TestReceiptFilename(t *testing.T) {
 		{[]string{"Southroads", "Utica"}, "", "092626-sams-19.08-milk-blank-split.pdf"},
 		{[]string{"Southroads"}, "", "092626-sams-19.08-milk-blank-southroads.pdf"},
 		{[]string{"Utica"}, "", "092626-sams-19.08-milk-blank-utica.pdf"},
-		{[]string{"Southroads", "Utica", "Third"}, "Food supplies", "092626-sams-19.08-milk-food-supplies-split.pdf"},
+		{[]string{"Southroads", "Utica", "Third"}, "Food supplies", "092626-sams-19.08-milk-food supplies-split.pdf"},
 		{nil, "", "092626-sams-19.08-milk-blank-blank.pdf"},
 	} {
 		got, err := receiptFilename(u, tc.locations, tc.category)
 		if err != nil || got != tc.want {
 			t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+		}
+		if strings.Count(got, "-") != 5 {
+			t.Fatalf("expected exactly five hyphens: %q", got)
 		}
 	}
 	u.CreatedAt = "2026-09-27T02:00:00Z"
@@ -31,13 +34,28 @@ func TestReceiptFilename(t *testing.T) {
 	if err != nil || !strings.HasPrefix(got, "092626-") {
 		t.Fatalf("Chicago date: %q %v", got, err)
 	}
-	if got := filenamePart("../Milk\r\n\" / Supplies"); got != "milk-supplies" {
+	if got := filenamePart("../Milk\r\n\" / Supplies"); got != "milk supplies" {
 		t.Fatal(got)
 	}
 	u.Description = "  Some item   with no dashes  "
 	got, err = receiptFilename(u, []string{"South Roads"}, "Food supplies")
-	if err != nil || got != "092626-sams-19.08-some item with no dashes-food-supplies-south-roads.pdf" {
+	if err != nil || got != "092626-sams-19.08-some item with no dashes-food supplies-south roads.pdf" {
 		t.Fatalf("description spaces: %q %v", got, err)
+	}
+}
+
+func TestReceiptFilenameFieldHyphens(t *testing.T) {
+	for _, total := range []string{"19.08", "-0.00"} {
+		u := UploadRow{CreatedAt: "2026-09-26T15:00:00Z", PurchaseLocation: "Wal-Mart", Total: total, Description: "Milk - office/supplies"}
+		got, err := receiptFilename(u, []string{"South-Roads"}, "Food-Supplies")
+		price := "19.08"
+		if total == "-0.00" {
+			price = "0.00"
+		}
+		want := "092626-walmart-" + price + "-milk office supplies-foodsupplies-southroads.pdf"
+		if err != nil || got != want || strings.Count(got, "-") != 5 {
+			t.Fatalf("got %q, %v; want %q with exactly five hyphens", got, err, want)
+		}
 	}
 }
 

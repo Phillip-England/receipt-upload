@@ -194,3 +194,55 @@ func TestRejectedUploadCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestClearFailedJob(t *testing.T) {
+	app := queueTestApp(t)
+	if w := queueRequest(t, app, []byte("invalid image"), "1"); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	id, _ := jobState(t, app)
+	clear := func(auth bool, method string) int {
+		r := httptest.NewRequest(method, "/admin/jobs/"+id+"/clear", nil)
+		if auth {
+			r.AddCookie(&http.Cookie{Name: sessionCookie, Value: signSession("test")})
+		}
+		w := httptest.NewRecorder()
+		app.retryJob(w, r)
+		return w.Code
+	}
+	if code := clear(false, "POST"); code != 401 {
+		t.Fatal(code)
+	}
+	if code := clear(true, "GET"); code != 405 {
+		t.Fatal(code)
+	}
+	if code := clear(true, "POST"); code != 303 {
+		t.Fatal(code)
+	}
+	if _, state := jobState(t, app); state != "queued" {
+		t.Fatal("cleared queued job", state)
+	}
+	if _, err := processNextJob(app.settings); err != nil {
+		t.Fatal(err)
+	}
+	if code := clear(true, "POST"); code != 303 {
+		t.Fatal(code)
+	}
+	if _, err := os.Stat(filepath.Join(app.settings.queueDir(), id)); !os.IsNotExist(err) {
+		t.Fatal("sources remain", err)
+	}
+	db, err := openDB(app.settings.dbPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, table := range []string{"receipt_jobs", "uploads", "receipt_stores"} {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s: count=%d err=%v", table, count, err)
+		}
+	}
+	if code := clear(true, "POST"); code != 303 {
+		t.Fatal("repeat clear", code)
+	}
+}

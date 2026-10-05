@@ -241,8 +241,9 @@ make clean
 Downloads use `MMDDYY-vendor-price-description-category-location.pdf`, for example
 `092626-sams-19.08-milk-blank-split.pdf`. The date is the upload date in
 America/Chicago, and the price has two decimal places. Names are lowercase with
-punctuation converted to hyphens (apostrophes are removed). Spaces in the
-description are preserved; spaces in other fields become hyphens.
+hyphens and apostrophes removed from each field. Other punctuation becomes
+spaces, and repeated spaces are collapsed. Every filename contains exactly five
+hyphens, separating the six fields.
 A single selected location uses its name; two or more use `split`.
 Missing descriptions, categories, or locations use literal `blank`.
 
@@ -253,3 +254,6 @@ Delete moves a receipt to the graveyard without removing its PDF. Permanent
 deletion is available only for receipts in the graveyard and asks for confirmation.
 Existing archived receipts appear in the active list after upgrading; their PDFs
 are preserved. Database changes are applied automatically at server startup.
+
+Failed conversion jobs offer Retry and Clear. Clear removes the failed upload and
+its queued source files; queued, processing, and completed jobs cannot be cleared.
