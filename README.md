@@ -30,7 +30,7 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 - Go toolchain.
 - A C compiler for the SQLite driver.
 
-No external command or image conversion package is required. Go compiles image decoding, resizing, PDF generation, and SQLite support into `receipt-upload` itself.
+FFmpeg is required on the worker’s PATH for image decoding and resizing (for example, `apt-get install ffmpeg` on Debian/Ubuntu). The Docker image includes it. Go handles white backgrounds, JPEG compression, PDF generation, and SQLite. Each image conversion has a 60-second timeout; failures retain the originals for retry. Supported image formats depend on the installed FFmpeg build.
 
 ## Install
 

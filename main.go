@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,7 +16,6 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,9 +35,6 @@ import (
 	"unicode"
 
 	_ "github.com/mattn/go-sqlite3"
-	"golang.org/x/image/bmp"
-	xdraw "golang.org/x/image/draw"
-	"golang.org/x/image/webp"
 	"golang.org/x/term"
 )
 
@@ -852,42 +850,44 @@ func firstText(text map[string][]string, key string) string {
 }
 
 func preparePDFImage(data []byte) (PdfImage, error) {
-	img, format, err := image.Decode(bytes.NewReader(data))
+	// Use a seekable input: phone image containers may require seeking.
+	input, err := os.CreateTemp("", "receipt-image-*")
 	if err != nil {
 		return PdfImage{}, err
 	}
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	// Browser-prepared RGB JPEGs can be embedded directly, avoiding another
-	// resize/encode pass and preserving receipt text through one compression.
-	if format == "jpeg" && max(width, height) <= maxImageDimension && len(data) <= 512*1024 {
-		if _, ok := img.(*image.YCbCr); ok {
-			return PdfImage{Width: width, Height: height, JPEG: data}, nil
+	defer os.Remove(input.Name())
+	if _, err = input.Write(data); err != nil {
+		input.Close()
+		return PdfImage{}, err
+	}
+	if err = input.Close(); err != nil {
+		return PdfImage{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	filter := fmt.Sprintf("scale=w='min(%d,iw)':h='min(%d,ih)':force_original_aspect_ratio=decrease,format=rgba", maxImageDimension, maxImageDimension)
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-protocol_whitelist", "file,pipe", "-threads", "1", "-i", input.Name(), "-map", "0:v:0", "-frames:v", "1", "-vf", filter, "-threads", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1")
+	var out, diagnostics bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &diagnostics
+	if err = cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return PdfImage{}, fmt.Errorf("FFmpeg conversion timed out: %w", ctx.Err())
 		}
+		return PdfImage{}, fmt.Errorf("FFmpeg conversion failed: %w: %s", err, strings.TrimSpace(diagnostics.String()))
 	}
-	scale := math.Min(1, float64(maxImageDimension)/float64(max(width, height)))
-	newW := max(1, int(math.Round(float64(width)*scale)))
-	newH := max(1, int(math.Round(float64(height)*scale)))
-	rgb := image.NewRGBA(image.Rect(0, 0, newW, newH))
-	draw.Draw(rgb, rgb.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
-	if width == newW && height == newH {
-		draw.Draw(rgb, rgb.Bounds(), img, bounds.Min, draw.Over)
-	} else {
-		xdraw.CatmullRom.Scale(rgb, rgb.Bounds(), img, bounds, draw.Over, nil)
+	img, err := png.Decode(&out)
+	if err != nil {
+		return PdfImage{}, fmt.Errorf("invalid FFmpeg output: %w", err)
 	}
-	var out bytes.Buffer
+	bounds := img.Bounds()
+	rgb := image.NewRGBA(bounds)
+	draw.Draw(rgb, bounds, &image.Uniform{color.White}, image.Point{}, draw.Src)
+	draw.Draw(rgb, bounds, img, bounds.Min, draw.Over)
+	out.Reset()
 	if err := jpeg.Encode(&out, rgb, &jpeg.Options{Quality: jpegQuality}); err != nil {
 		return PdfImage{}, err
 	}
-	return PdfImage{Width: newW, Height: newH, JPEG: out.Bytes()}, nil
-}
-
-func init() {
-	image.RegisterFormat("jpeg", "\xff\xd8", jpeg.Decode, jpeg.DecodeConfig)
-	image.RegisterFormat("png", "\x89PNG\r\n\x1a\n", png.Decode, png.DecodeConfig)
-	image.RegisterFormat("gif", "GIF8?a", gif.Decode, gif.DecodeConfig)
-	image.RegisterFormat("bmp", "BM", bmp.Decode, bmp.DecodeConfig)
-	image.RegisterFormat("webp", "RIFF????WEBPVP8", webp.Decode, webp.DecodeConfig)
+	return PdfImage{Width: bounds.Dx(), Height: bounds.Dy(), JPEG: out.Bytes()}, nil
 }
 
 func writePDF(images []PdfImage, outputPath string) error {
@@ -1176,7 +1176,7 @@ docker run --rm -p 8725:8725 \
   -v "$PWD/config/.env:/app/config/.env:ro" \
   -v receipt-upload-data:/app/data \
   receipt-upload</code></pre></div></div><p class="docs-note">Persist <code>./data</code>. It contains <code>main.sqlite</code>, queued original images, and generated receipt PDFs. The default Docker command runs both the web server and worker.</p></section>
-<section class="docs-section"><div class="section-intro"><p class="eyebrow">Operational notes</p><h2>Designed to stay small</h2></div><div class="feature-grid"><article><h3>Image processing included</h3><p>Phone photos are resized to a maximum 1600px dimension and JPEG-compressed before PDF generation. No external converter is required.</p></article><article><h3>Local, portable data</h3><p>Metadata lives in one SQLite database at <code>./data/main.sqlite</code> and receipt PDFs live beside it under <code>./data/receipts</code>.</p></article><article><h3>Protected administration</h3><p>Three failed login attempts ban an IP for 24 hours. The CLI can list and remove ban records.</p></article></div></section></main>`
+<section class="docs-section"><div class="section-intro"><p class="eyebrow">Operational notes</p><h2>Designed to stay small</h2></div><div class="feature-grid"><article><h3>Image processing included</h3><p>Phone photos are resized to a maximum 1600px dimension and JPEG-compressed before PDF generation. FFmpeg handles image decoding and resizing; install it when running outside Docker.</p></article><article><h3>Local, portable data</h3><p>Metadata lives in one SQLite database at <code>./data/main.sqlite</code> and receipt PDFs live beside it under <code>./data/receipts</code>.</p></article><article><h3>Protected administration</h3><p>Three failed login attempts ban an IP for 24 hours. The CLI can list and remove ban records.</p></article></div></section></main>`
 	return layout("receipt-upload — Developer documentation", body)
 }
 

@@ -6,6 +6,8 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -68,12 +70,43 @@ func TestPreparePDFImage(t *testing.T) {
 					t.Fatal("transparent background must be white")
 				}
 			}
-			if tc.name == "prepared JPEG" && !bytes.Equal(result.JPEG, buf.Bytes()) {
-				t.Fatal("prepared JPEG was recompressed")
-			}
 		})
 	}
 	if _, err := preparePDFImage([]byte("invalid image")); err == nil {
 		t.Fatal("accepted invalid image")
+	}
+}
+
+func TestFFmpegReceiptFormats(t *testing.T) {
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 80, 40))); err != nil {
+		t.Fatal(err)
+	}
+	for _, codec := range []string{"tiff", "webp", "bmp"} {
+		t.Run(codec, func(t *testing.T) {
+			cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "1", "-i", "pipe:0", "-frames:v", "1", "-threads", "1", "-c:v", codec, "-f", "image2pipe", "pipe:1")
+			cmd.Stdin = bytes.NewReader(source.Bytes())
+			data, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := queueTestApp(t)
+			queueRequest(t, app, data, "1")
+			if _, err := processNextJob(app.settings); err != nil {
+				t.Fatal(err)
+			}
+			_, status := jobState(t, app)
+			if status != "completed" {
+				t.Fatalf("%s conversion status: %s", codec, status)
+			}
+		})
+	}
+}
+
+func TestMissingFFmpeg(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := preparePDFImage([]byte("image"))
+	if err == nil || !strings.Contains(err.Error(), "FFmpeg conversion failed") {
+		t.Fatalf("missing dependency error: %v", err)
 	}
 }

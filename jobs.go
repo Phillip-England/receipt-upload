@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -144,6 +145,9 @@ func (a *App) handleUpload(r *http.Request) error {
 }
 
 func runWorker(config string) error {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("receipt worker requires FFmpeg on PATH: %w", err)
+	}
 	settings, err := loadSettings(config)
 	if err != nil {
 		return err

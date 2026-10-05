@@ -83,7 +83,7 @@
 # Dockerize
 - application should have Dockerfile
 - Docker image contains only the receipt-upload application and its runtime system packages
-- receipt-upload contains its image processing and PDF generation functionality directly
+- receipt-upload uses FFmpeg for image decoding and resizing and generates PDFs directly
 - make deployment easier
 
 # Speed of Upload/Download
@@ -108,7 +108,7 @@
 
 # Spec Clarifications Added During Migration
 - stores are many-to-many with receipts using checkboxes and a receipt_stores table
-- upload accepts receipt images only, not PDFs, because the Go speed path resizes images before creating the final PDF
+- upload accepts receipt images only, not PDFs, because the FFmpeg worker resizes images before creating the final PDF
 - each image is resized to max 1600px on the longest side and JPEG-compressed before PDF generation
 - browser also attempts client-side resizing before upload to reduce phone-camera upload size
 - external image conversion install setting removed because no external image conversion dependency remains
