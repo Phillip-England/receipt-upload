@@ -27,6 +27,11 @@ func queueTestApp(t *testing.T) *App {
 }
 func queueRequest(t *testing.T, app *App, data []byte, cardholder string) *httptest.ResponseRecorder {
 	t.Helper()
+	return queueFilesRequest(t, app, [][]byte{data}, []string{"original.jpg"}, cardholder)
+}
+
+func queueFilesRequest(t *testing.T, app *App, files [][]byte, names []string, cardholder string) *httptest.ResponseRecorder {
+	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	for key, value := range map[string]string{"cardholder_id": cardholder, "total": "19.08", "purchase_location": "Vendor", "store_ids": "1", "description": "Milk"} {
@@ -34,11 +39,15 @@ func queueRequest(t *testing.T, app *App, data []byte, cardholder string) *httpt
 			t.Fatal(err)
 		}
 	}
-	part, err := writer.CreateFormFile("files", "original.jpg")
-	if err != nil {
-		t.Fatal(err)
+	for i, data := range files {
+		part, err := writer.CreateFormFile("files", names[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(data); err != nil {
+			t.Fatal(err)
+		}
 	}
-	part.Write(data)
 	writer.Close()
 	r := httptest.NewRequest("POST", "/upload/secret", &body)
 	r.Header.Set("Content-Type", writer.FormDataContentType())
@@ -64,7 +73,7 @@ func TestQueuedReceiptLifecycle(t *testing.T) {
 	var photo bytes.Buffer
 	jpeg.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 10, 20)), nil)
 	w := queueRequest(t, app, photo.Bytes(), "1")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "conversion is queued") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "Processing is queued") {
 		t.Fatalf("upload: %d %s", w.Code, w.Body.String())
 	}
 	id, state := jobState(t, app)
@@ -244,5 +253,75 @@ func TestClearFailedJob(t *testing.T) {
 	}
 	if code := clear(true, "POST"); code != 303 {
 		t.Fatal("repeat clear", code)
+	}
+}
+
+func TestPDFUploadPreservesDownloadedBytes(t *testing.T) {
+	app := queueTestApp(t)
+	// Any attempted image conversion must fail in this test.
+	t.Setenv("PATH", t.TempDir())
+	var original bytes.Buffer
+	var photo bytes.Buffer
+	if err := jpeg.Encode(&photo, image.NewRGBA(image.Rect(0, 0, 10, 20)), nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "receipt.pdf")
+	if err := writePDF([]PdfImage{{JPEG: photo.Bytes(), Width: 10, Height: 20}}, path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Write(data)
+	w := queueFilesRequest(t, app, [][]byte{original.Bytes()}, []string{"receipt.PDF"}, "1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", w.Code, w.Body.String())
+	}
+	id, _ := jobState(t, app)
+	if worked, err := processNextJob(app.settings); !worked || err != nil {
+		t.Fatal(worked, err)
+	}
+	if _, state := jobState(t, app); state != "completed" {
+		t.Fatal(state)
+	}
+	stored, err := os.ReadFile(filepath.Join(app.settings.UploadDir, id+".pdf"))
+	if err != nil || !bytes.Equal(stored, original.Bytes()) {
+		t.Fatal("stored PDF differs from upload", err)
+	}
+	view, err := loadAdminView(app.settings)
+	if err != nil || len(view.Uploads) != 1 {
+		t.Fatal(view, err)
+	}
+	r := httptest.NewRequest("GET", "/admin/uploads/1/download", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: signSession("test")})
+	w = httptest.NewRecorder()
+	app.uploadAction(w, r)
+	if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), original.Bytes()) {
+		t.Fatalf("download changed PDF: status %d", w.Code)
+	}
+	if got := w.Header().Get("Content-Disposition"); !strings.Contains(got, "-vendor-19.08-milk-blank-store.pdf") || strings.Contains(got, "receipt.PDF") {
+		t.Fatal("download filename", got)
+	}
+	if _, err := os.Stat(filepath.Join(app.settings.queueDir(), id)); !os.IsNotExist(err) {
+		t.Fatal("PDF source not cleaned up", err)
+	}
+}
+
+func TestRejectPDFWithOtherFiles(t *testing.T) {
+	for _, other := range [][]byte{[]byte("image"), []byte("%PDF-1.4\nother")} {
+		app := queueTestApp(t)
+		w := queueFilesRequest(t, app, [][]byte{[]byte("%PDF-1.4\nreceipt"), other}, []string{"receipt.pdf", "other"}, "1")
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "one PDF on its own") {
+			t.Fatalf("upload: %d %s", w.Code, w.Body.String())
+		}
+		entries, err := os.ReadDir(app.settings.queueDir())
+		if err != nil || len(entries) != 0 {
+			t.Fatal("rejected files retained", entries, err)
+		}
+		view, err := loadAdminView(app.settings)
+		if err != nil || len(view.Uploads) != 0 {
+			t.Fatal("rejected receipt visible", view, err)
+		}
 	}
 }

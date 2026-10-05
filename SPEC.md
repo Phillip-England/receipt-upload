@@ -108,7 +108,8 @@
 
 # Spec Clarifications Added During Migration
 - stores are many-to-many with receipts using checkboxes and a receipt_stores table
-- upload accepts receipt images only, not PDFs, because the FFmpeg worker resizes images before creating the final PDF
+- upload accepts multiple receipt images or one PDF; the worker preserves PDF bytes unchanged and downloads only rename the file
+- PDFs must be uploaded individually, separately from images or other PDFs
 - each image is resized to max 1600px on the longest side and JPEG-compressed before PDF generation
 - browser also attempts client-side resizing before upload to reduce phone-camera upload size
 - external image conversion install setting removed because no external image conversion dependency remains

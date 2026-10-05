@@ -90,7 +90,16 @@ func (a *App) handleUpload(r *http.Request) error {
 		part.Close()
 	}
 	if len(filenames) == 0 {
-		return errors.New("Please choose at least one receipt image.")
+		return errors.New("Please choose receipt images or one PDF.")
+	}
+	for i := range filenames {
+		pdf, err := isPDFFile(filepath.Join(staging, fmt.Sprintf("%06d", i)))
+		if err != nil {
+			return err
+		}
+		if pdf && len(filenames) != 1 {
+			return errors.New("Please upload one PDF on its own, or select only receipt images.")
+		}
 	}
 	cardholder, err := strconv.ParseInt(requiredText(text, "cardholder_id"), 10, 64)
 	if err != nil {
@@ -142,6 +151,41 @@ func (a *App) handleUpload(r *http.Request) error {
 	}
 	published = true
 	return nil
+}
+
+// Detect PDFs by content because queued filenames have no extension.
+func isPDFFile(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var header [5]byte
+	_, err = io.ReadFull(f, header[:])
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return string(header[:]) == "%PDF-", nil
+}
+
+func copyReceiptPDF(source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
 
 func runWorker(config string) error {
@@ -217,9 +261,31 @@ func processNextJob(settings Settings) (bool, error) {
 		if err != nil {
 			return err
 		}
+		if len(files) == 0 {
+			return errors.New("No receipt files found")
+		}
+		if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
+			return err
+		}
+		temp := output + ".tmp"
+		defer os.Remove(temp)
 		images := []PdfImage{}
 		for _, file := range files {
-			data, err := os.ReadFile(filepath.Join(dir, file.Name()))
+			source := filepath.Join(dir, file.Name())
+			pdf, err := isPDFFile(source)
+			if err != nil {
+				return err
+			}
+			if pdf {
+				if len(files) != 1 {
+					return errors.New("Please upload one PDF on its own, or select only receipt images.")
+				}
+				if err := copyReceiptPDF(source, temp); err != nil {
+					return err
+				}
+				break
+			}
+			data, err := os.ReadFile(source)
 			if err != nil {
 				return err
 			}
@@ -229,16 +295,10 @@ func processNextJob(settings Settings) (bool, error) {
 			}
 			images = append(images, img)
 		}
-		if len(images) == 0 {
-			return errors.New("No receipt images found")
-		}
-		if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
-			return err
-		}
-		temp := output + ".tmp"
-		defer os.Remove(temp)
-		if err := writePDF(images, temp); err != nil {
-			return err
+		if len(images) > 0 {
+			if err := writePDF(images, temp); err != nil {
+				return err
+			}
 		}
 		if err := os.Rename(temp, output); err != nil {
 			return err

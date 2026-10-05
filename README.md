@@ -2,7 +2,7 @@
 
 `receipt-upload` is a small Go receipt collection portal for one admin user.
 
-The admin logs in, manages cardholders and stores, and reviews uploaded receipts. Cardholders do not have accounts. They receive a secret upload link, choose their name, enter receipt details, upload one or more receipt images, and the app creates one compressed PDF per expense.
+The admin logs in, manages cardholders and stores, and reviews uploaded receipts. Cardholders do not have accounts. They receive a secret upload link, choose their name, enter receipt details, upload one or more receipt images or one PDF. The app creates one compressed PDF per image expense and preserves uploaded PDFs unchanged.
 
 ## Features
 
@@ -12,7 +12,8 @@ The admin logs in, manages cardholders and stores, and reviews uploaded receipts
 - Cardholder and store management from the admin portal.
 - Multiple store checkboxes per receipt.
 - Multiple receipt images per upload, resized and merged into one PDF.
-- Uploads stream original images to a durable queue and return before conversion.
+- Single PDF uploads are preserved byte for byte; downloads only assign the receipt filename. Upload PDFs separately from other files.
+- Uploads stream original files to a durable queue and return before processing.
 - A separate worker polls `data/queue` every second and converts one receipt at a time.
 - Admin conversion jobs show queued, processing, and failed receipts, with retry controls.
 - Already-prepared RGB JPEGs up to 1600 pixels and 512 KB are embedded in PDFs without a second compression pass.
@@ -172,9 +173,9 @@ Cardholders open the secret upload link and submit:
 - One or more stores.
 - Optional description.
 - Optional notes.
-- One or more receipt images.
+- One or more receipt images, or one PDF.
 
-Each submission is acknowledged once the originals and metadata are saved. PDF conversion runs later in the worker. Unsupported or corrupt images appear as failed jobs in administration; their originals remain available for retry.
+Each submission is acknowledged once the originals and metadata are saved. The worker converts images later and copies single PDF uploads unchanged. Unsupported or corrupt images appear as failed jobs in administration; their originals remain available for retry.
 
 ## Receipt Storage
 
@@ -194,7 +195,7 @@ data/
 
 SQLite stores receipt metadata, selected stores, timestamps, deletion status, PDF paths, and conversion job status. The worker processes only directories registered as queued jobs in SQLite; arbitrary files dropped in the directory are not treated as receipts.
 
-Run `serve` and `worker` as two supervised processes using the same working directory and config file. Only one worker may run for a data directory. Interrupted processing jobs return to the queue on worker restart. PDFs are published with an atomic rename, and receipt size and completion status are committed together, so restarting does not duplicate receipts. Original images are deleted after successful conversion; failed jobs retain them. Receipt dates and cardholder/location names are captured at upload time. The admin job panel refreshes every five seconds; refresh the dashboard to see newly completed PDFs.
+Run `serve` and `worker` as two supervised processes using the same working directory and config file. Only one worker may run for a data directory. Interrupted processing jobs return to the queue on worker restart. PDFs are published with an atomic rename, and receipt size and completion status are committed together, so restarting does not duplicate receipts. Queued originals are deleted after successful processing; failed jobs retain them. Receipt dates and cardholder/location names are captured at upload time. The admin job panel refreshes every five seconds; refresh the dashboard to see newly completed PDFs.
 
 ## Login Ban System
 
